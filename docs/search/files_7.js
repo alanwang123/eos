@@ -1,6 +1,7 @@
 var searchData=
 [
-  ['social_2ecpp',['social.cpp',['../social_8cpp.html',1,'']]],
-  ['system_2ecpp',['system.cpp',['../system_8cpp.html',1,'']]],
-  ['system_2ehpp',['system.hpp',['../system_8hpp.html',1,'']]]
+  ['print_2eh',['print.h',['../print_8h.html',1,'']]],
+  ['print_2ehpp',['print.hpp',['../print_8hpp.html',1,'']]],
+  ['proxy_2ecpp',['proxy.cpp',['../proxy_8cpp.html',1,'']]],
+  ['proxy_2ehpp',['proxy.hpp',['../proxy_8hpp.html',1,'']]]
 ];

@@ -1,3 +1,7 @@
+/**
+ *  @file
+ *  @copyright defined in eos/LICENSE.txt
+ */
 #pragma once
 #include <eos/chain/exceptions.hpp>
 #include <eos/chain/message.hpp>
@@ -5,10 +9,10 @@
 #include <Runtime/Runtime.h>
 #include "IR/Module.h"
 
-namespace eos { namespace chain {
+namespace eosio { namespace chain {
 
-class  chain_controller;
-typedef int32_t (message_validate_context::*load_i128i128_fnc)(Name, Name, Name, uint128_t* , uint128_t*, char* , uint32_t);
+class chain_controller;
+class wasm_memory;
 
 /**
  * @class wasm_interface
@@ -20,34 +24,56 @@ typedef int32_t (message_validate_context::*load_i128i128_fnc)(Name, Name, Name,
  */
 class wasm_interface {
    public:
+      enum key_type {
+         str,
+         i64,
+         i128i128,
+         i64i64i64,
+         invalid_key_type
+      };
+      typedef map<name, key_type> TableMap;
       struct ModuleState {
-         Runtime::ModuleInstance* instance     = nullptr;
-         IR::Module*              module       = nullptr;
-         int                      mem_start    = 0;
-         int                      mem_end      = 1<<16;
+         Runtime::ModuleInstance* instance = nullptr;
+         IR::Module*              module = nullptr;
+         int                      mem_start = 0;
+         int                      mem_end = 1<<16;
          vector<char>             init_memory;
          fc::sha256               code_version;
+         TableMap                 table_key_types;
+         bool                     tables_fixed = false;
       };
 
       static wasm_interface& get();
 
       void init( apply_context& c );
-      void apply( apply_context& c );
-      void validate( message_validate_context& c );
-      void precondition( precondition_validate_context& c );
+      void apply( apply_context& c, uint32_t execution_time, bool received_block );
+      void validate( apply_context& c );
+      void precondition( apply_context& c );
 
       int64_t current_execution_time();
 
-      apply_context*                  current_apply_context        = nullptr;
-      message_validate_context*       current_validate_context     = nullptr;
-      precondition_validate_context*  current_precondition_context = nullptr;
+      static key_type to_key_type(const types::type_name& type_name);
+      static std::string to_type_name(key_type key_type);
 
-      Runtime::MemoryInstance*   current_memory  = nullptr;
-      Runtime::ModuleInstance*   current_module  = nullptr;
-      ModuleState*               current_state   = nullptr;
+      apply_context*       current_apply_context = nullptr;
+      apply_context*       current_validate_context = nullptr;
+      apply_context*       current_precondition_context = nullptr;
+
+      Runtime::MemoryInstance*   current_memory = nullptr;
+      Runtime::ModuleInstance*   current_module = nullptr;
+      ModuleState*               current_state = nullptr;
+      wasm_memory*               current_memory_management = nullptr;
+      TableMap*                  table_key_types = nullptr;
+      bool                       tables_fixed = false;
+      int64_t                    table_storage = 0;
+
+      uint32_t                   checktime_limit = 0;
+
+      int32_t                    per_code_account_max_db_limit_mbytes = config::default_per_code_account_max_db_limit_mbytes;
+      uint32_t                   row_overhead_db_limit_bytes = config::default_row_overhead_db_limit_bytes;
 
    private:
-      void load( const AccountName& name, const chainbase::database& db );
+      void load( const account_name& name, const chainbase::database& db );
 
       char* vm_allocate( int bytes );   
       void  vm_call( const char* name );
@@ -59,13 +85,11 @@ class wasm_interface {
 
 
 
-      map<AccountName, ModuleState> instances;
+      map<account_name, ModuleState> instances;
       fc::time_point checktimeStart;
 
       wasm_interface();
-
-      int32_t load_i128i128_object( uint64_t scope, uint64_t code, uint64_t table, int32_t valueptr, int32_t valuelen, load_i128i128_fnc function );
 };
 
 
-} } // eos::chain
+} } // eosio::chain

@@ -2,8 +2,10 @@ file(GLOB HEADERS "include/eos/chain/*.hpp")
 
 ## SORT .cpp by most likely to change / break compile
 add_library( eos_chain
+             wast_to_wasm.cpp
              chain_controller.cpp
              wasm_interface.cpp
+             block_schedule.cpp
 
              fork_database.cpp
 
@@ -13,11 +15,13 @@ add_library( eos_chain
              get_config.cpp
 
              block_log.cpp
-             BlockchainConfiguration.cpp
+             blockchain_configuration.cpp
 
              types.cpp
              chain_administration_interface.cpp
              message_handling_contexts.cpp
+             producer_objects.cpp
+             staked_balance_objects.cpp
 
              ${HEADERS}
            )
