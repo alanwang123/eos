@@ -1,12 +1,4 @@
 /**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
-#pragma once
-
-#include <fc/crypto/digest.hpp>
-
-/**
  * @file Contains support macros for the testcase helper macros. These macros are implementation details, and thus
  * should not be used directly. Use their frontends instead.
  */
@@ -25,54 +17,38 @@
    native_contract::native_contract_chain_initializer name ## _initializer(genesis_state()); \
    testing_blockchain name(name ## _db, name ## _fdb, name ## _log, name ## _initializer, *this); \
    BOOST_TEST_CHECKPOINT("Created blockchain " << #name);
-#define MKCHAIN5(name, transaction_execution_time_sec, receive_block_execution_time_sec, create_block_execution_time_sec, rate_limits) \
-   chainbase::database name ## _db(get_temp_dir(), chainbase::database::read_write, TEST_DB_SIZE); \
-   block_log name ## _log(get_temp_dir() / "blocklog"); \
-   fork_database name ## _fdb; \
-   native_contract::native_contract_chain_initializer name ## _initializer(genesis_state()); \
-   testing_blockchain name(name ## _db, name ## _fdb, name ## _log, name ## _initializer, *this, transaction_execution_time_sec, receive_block_execution_time_sec, create_block_execution_time_sec, rate_limits); \
-   BOOST_TEST_CHECKPOINT("Created blockchain " << #name);
 #define MKCHAINS_MACRO(x, y, name) Make_Blockchain(name)
 
 #define MKNET1(name) testing_network name; BOOST_TEST_CHECKPOINT("Created testnet " << #name);
 #define MKNET2_MACRO(x, name, chain) name.connect_blockchain(chain);
 #define MKNET2(name, ...) MKNET1(name) BOOST_PP_SEQ_FOR_EACH(MKNET2_MACRO, name, __VA_ARGS__)
 
-inline std::vector<name> sort_names( std::vector<name>&& names ) {
+inline std::vector<Name> sort_names( std::vector<Name>&& names ) {
    std::sort( names.begin(), names.end() );
    auto itr = std::unique( names.begin(), names.end() );
    names.erase( itr, names.end() );
    return names;
 }
 
-#define Complex_Authority_macro_Key(r, data, key_bubble) \
-   data.keys.emplace_back(BOOST_PP_CAT(BOOST_PP_TUPLE_ELEM(2, 0, key_bubble), _public_key), \
-                          BOOST_PP_TUPLE_ELEM(2, 1, key_bubble));
-#define Complex_Authority_macro_Account(r, data, account_bubble) \
-   data.accounts.emplace_back(types::account_permission{BOOST_PP_TUPLE_ELEM(3, 0, account_bubble), \
-                                                       BOOST_PP_TUPLE_ELEM(3, 1, account_bubble)}, \
-                              BOOST_PP_TUPLE_ELEM(3, 2, account_bubble));
-
 #define MKACCT_IMPL(chain, name, creator, active, owner, recovery, deposit) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names({ #creator, config::eos_contract_name }); \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#creator, "active"}}, \
-                         "newaccount", types::newaccount{#creator, #name, owner, active, recovery, deposit}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names({ #creator, "eos" }); \
+      trx.authorizations = vector<types::AccountPermission>{{#creator,"active"}}; \
+      trx.emplaceMessage(config::EosContractName, "newaccount", types::newaccount{#creator, #name, owner, active, recovery, deposit}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
-      chain.push_transaction(trx); \
+      trx.set_reference_block(chain.head_block_id()); \
+      chain.push_transaction(trx, chain_controller::skip_transaction_signatures); \
       BOOST_TEST_CHECKPOINT("Created account " << #name); \
    }
 #define MKACCT2(chain, name) \
    Make_Key(name) \
    MKACCT_IMPL(chain, name, inita, Key_Authority(name ## _public_key), Key_Authority(name ## _public_key), \
-               Account_Authority(inita), asset(100))
+               Account_Authority(inita), Asset(100))
 #define MKACCT3(chain, name, creator) \
    Make_Key(name) \
    MKACCT_IMPL(chain, name, creator, Key_Authority(name ## _public_key), Key_Authority(name ## _public_key), \
-               Account_Authority(creator), asset(100))
+               Account_Authority(creator), Asset(100))
 #define MKACCT4(chain, name, creator, deposit) \
    Make_Key(name) \
    MKACCT_IMPL(chain, name, creator, Key_Authority(name ## _public_key), Key_Authority(name ## _public_key), \
@@ -85,95 +61,27 @@ inline std::vector<name> sort_names( std::vector<name>&& names ) {
 #define MKACCT7(chain, name, creator, deposit, owner, active, recovery) \
    MKACCT_IMPL(chain, name, creator, owner, active, recovery, deposit)
 
-#define SETCODE3(chain, acct, wast) \
-   { \
-      auto wasm = eosio::chain::wast_to_wasm(wast); \
-      types::setcode handler; \
-      handler.account = #acct; \
-      handler.code.assign(wasm.begin(), wasm.end()); \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names({config::eos_contract_name, #acct}); \
-      transaction_emplace_message(trx, config::eos_contract_name, vector<types::account_permission>{{#acct,"active"}}, \
-                                  "setcode", handler); \
-   }
-
-#define SETAUTH5(chain, account, authname, parentname, auth) \
-   { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = {#account}; \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#account,"active"}}, \
-                         "updateauth", types::updateauth{#account, authname, parentname, auth}); \
-      trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
-      chain.push_transaction(trx); \
-      BOOST_TEST_CHECKPOINT("Set " << #account << "'s " << authname << " authority."); \
-   }
-
-#define DELAUTH3(chain, account, authname) \
-   { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = {#account}; \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#account,"active"}}, \
-                         "deleteauth", types::deleteauth{#account, authname}); \
-      trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
-      chain.push_transaction(trx); \
-      BOOST_TEST_CHECKPOINT("Deleted " << #account << "'s " << authname << " authority."); \
-   }
-
-#define LINKAUTH5(chain, account, authname, codeacct, messagetype) \
-   { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = {#account}; \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#account,"active"}}, \
-                         "linkauth", types::linkauth{#account, #codeacct, messagetype, authname}); \
-      trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
-      chain.push_transaction(trx); \
-      BOOST_TEST_CHECKPOINT("Link " << #codeacct << "::" << messagetype << " to " << #account \
-                            << "'s " << authname << " authority."); \
-   }
-#define LINKAUTH4(chain, account, authname, codeacct) LINKAUTH5(chain, account, authname, codeacct, "")
-
-#define UNLINKAUTH4(chain, account, codeacct, messagetype) \
-   { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = {#account}; \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#account,"active"}}, \
-                         "unlinkauth", types::unlinkauth{#account, #codeacct, messagetype}); \
-      trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
-      chain.push_transaction(trx); \
-      BOOST_TEST_CHECKPOINT("Unlink " << #codeacct << "::" << messagetype << " from " << #account); \
-   }
-#define LINKAUTH3(chain, account, codeacct) LINKAUTH5(chain, account, codeacct, "")
-
 #define XFER5(chain, sender, recipient, Amount, memo) \
    { \
-      eosio::chain::signed_transaction trx; \
+      eos::chain::SignedTransaction trx; \
       trx.scope = sort_names({#sender,#recipient}); \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{ {#sender,"active"} }, \
-                         "transfer", types::transfer{#sender, #recipient, Amount.amount, memo}); \
+      trx.authorizations = vector<types::AccountPermission>{{#sender,"active"}}; \
+      trx.emplaceMessage(config::EosContractName, "transfer", types::transfer{#sender, #recipient, Amount.amount}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
-      BOOST_TEST_CHECKPOINT("Transferred " << Amount << " from " << #sender << " to " << #recipient); \
+      BOOST_TEST_CHECKPOINT("Transfered " << Amount << " from " << #sender << " to " << #recipient); \
    }
 #define XFER4(chain, sender, recipient, amount) XFER5(chain, sender, recipient, amount, "")
 
 #define STAKE4(chain, sender, recipient, amount) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names( { #sender, #recipient, config::eos_contract_name } ); \
-      transaction_emplace_message(trx, config::eos_contract_name, vector<types::account_permission>{{#sender, "active"}}, \
-                        "lock", types::lock{#sender, #recipient, amount}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names( { #sender, #recipient } ); \
+      trx.authorizations = vector<types::AccountPermission>{{#sender,"active"}}; \
+      trx.emplaceMessage(config::EosContractName, "lock", types::lock{#sender, #recipient, amount}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
       BOOST_TEST_CHECKPOINT("Staked " << amount << " to " << #recipient); \
    }
@@ -181,68 +89,64 @@ inline std::vector<name> sort_names( std::vector<name>&& names ) {
 
 #define BEGIN_UNSTAKE3(chain, account, amount) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names( { config::eos_contract_name } ); \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#account, "active"}}, \
-                         "unlock", types::unlock{#account, amount}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names( { "eos" } ); \
+      trx.authorizations.emplace_back(types::AccountPermission{#account,"active"}); \
+      trx.emplaceMessage(config::EosContractName, "unlock", types::unlock{#account, amount}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
       BOOST_TEST_CHECKPOINT("Begin unstake " << amount << " to " << #account); \
    }
 
 #define FINISH_UNSTAKE3(chain, account, amount) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names( { config::eos_contract_name, #account } ); \
-      transaction_emplace_message(trx, config::eos_contract_name, vector<types::account_permission>{{#account, "active"}}, \
-                         "claim", types::claim{#account, amount}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names( { "eos", #account } ); \
+      trx.authorizations.emplace_back(types::AccountPermission{#account,"active"}); \
+      trx.emplaceMessage(config::EosContractName, "claim", types::claim{#account, amount}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
       BOOST_TEST_CHECKPOINT("Finish unstake " << amount << " to " << #account); \
    }
 
 #define MKPDCR4(chain, owner, key, cfg) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names( {#owner, config::eos_contract_name} ); \
-      transaction_emplace_message(trx, config::eos_contract_name, \
-                         vector<types::account_permission>{{#owner, "active"}}, \
-                         "setproducer", types::setproducer{#owner, key, cfg}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names( {#owner, "eos"} ); \
+      trx.authorizations = vector<types::AccountPermission>{{#owner,"active"}}; \
+      trx.emplaceMessage(config::EosContractName, "setproducer", types::setproducer{#owner, key, cfg}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
       BOOST_TEST_CHECKPOINT("Create producer " << #owner); \
    }
-#define MKPDCR3(chain, owner, key) MKPDCR4(chain, owner, key, blockchain_configuration{});
+#define MKPDCR3(chain, owner, key) MKPDCR4(chain, owner, key, BlockchainConfiguration{});
 #define MKPDCR2(chain, owner) \
    Make_Key(owner ## _producer); \
-   MKPDCR4(chain, owner, owner ## _producer_public_key, blockchain_configuration{});
+   MKPDCR4(chain, owner, owner ## _producer_public_key, BlockchainConfiguration{});
 
 #define APPDCR4(chain, voter, producer, approved) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names( {#voter, config::eos_contract_name} ); \
-      transaction_emplace_message(trx, config::eos_contract_name,  \
-                         vector<types::account_permission>{{#voter, "active"}}, \
-                         "okproducer", types::okproducer{#voter, #producer, approved? 1 : 0}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names( {#voter, "eos"} ); \
+      trx.authorizations = vector<types::AccountPermission>{{#voter,"active"}}; \
+      trx.emplaceMessage(config::EosContractName, "okproducer", types::okproducer{#voter, #producer, approved? 1:0}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
       BOOST_TEST_CHECKPOINT("Set producer approval from " << #voter << " for " << #producer << " to " << approved); \
    }
 
 #define UPPDCR4(chain, owner, key, cfg) \
    { \
-      eosio::chain::signed_transaction trx; \
-      trx.scope = sort_names( {owner, config::eos_contract_name} ); \
-      transaction_emplace_message(trx, config::eos_contract_name,  \
-                         vector<types::account_permission>{{owner, "active"}}, \
-                         "setproducer", types::setproducer{owner, key, cfg}); \
+      eos::chain::SignedTransaction trx; \
+      trx.scope = sort_names( {#owner, "eos"} ); \
+      trx.authorizations = vector<types::AccountPermission>{{owner,"active"}}; \
+      trx.emplaceMessage(config::EosContractName, "setproducer", types::setproducer{owner, key, cfg}); \
       trx.expiration = chain.head_block_time() + 100; \
-      transaction_set_reference_block(trx, chain.head_block_id()); \
+      trx.set_reference_block(chain.head_block_id()); \
       chain.push_transaction(trx); \
       BOOST_TEST_CHECKPOINT("Update producer " << owner); \
    }

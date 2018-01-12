@@ -1,11 +1,30 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
+/*
+ * Copyright (c) 2017, Respective Authors.
+ *
+ * The MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
  */
 #pragma once
 #include <eos/chain/transaction.hpp>
 
-namespace eosio { namespace chain {
+namespace eos { namespace chain {
 
    struct block_header
    {
@@ -17,7 +36,7 @@ namespace eosio { namespace chain {
       block_id_type                 previous;
       fc::time_point_sec            timestamp;
       checksum_type                 transaction_merkle_root;
-      account_name                  producer;
+      AccountName                   producer;
       /**
        * The changes in the round of producers after this block
        *
@@ -30,7 +49,7 @@ namespace eosio { namespace chain {
        * Even though the above examples are semantically equivalent (replace A and B with X and Y), only the first is
        * legal.
        */
-      round_changes                  producer_changes;
+      RoundChanges                  producer_changes;
    };
 
    struct signed_block_header : public block_header
@@ -44,8 +63,8 @@ namespace eosio { namespace chain {
    };
 
    struct thread {
-      vector<processed_generated_transaction> generated_input;
-      vector<processed_transaction>          user_input;
+      vector<generated_transaction_id_type> generated_input;
+      vector<ProcessedTransaction>          user_input;
 
       digest_type merkle_digest() const;
    };
@@ -58,9 +77,9 @@ namespace eosio { namespace chain {
       vector<cycle> cycles;
    };
 
-} } // eosio::chain
+} } // eos::chain
 
-FC_REFLECT(eosio::chain::block_header, (previous)(timestamp)(transaction_merkle_root)(producer)(producer_changes))
-FC_REFLECT_DERIVED(eosio::chain::signed_block_header, (eosio::chain::block_header), (producer_signature))
-FC_REFLECT(eosio::chain::thread, (generated_input)(user_input) )
-FC_REFLECT_DERIVED(eosio::chain::signed_block, (eosio::chain::signed_block_header), (cycles))
+FC_REFLECT(eos::chain::block_header, (previous)(timestamp)(transaction_merkle_root)(producer)(producer_changes))
+FC_REFLECT_DERIVED(eos::chain::signed_block_header, (eos::chain::block_header), (producer_signature))
+FC_REFLECT(eos::chain::thread, (generated_input)(user_input) )
+FC_REFLECT_DERIVED(eos::chain::signed_block, (eos::chain::signed_block_header), (cycles))

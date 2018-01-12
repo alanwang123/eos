@@ -4,6 +4,7 @@
 #include <fc/exception/exception.hpp>
 #include <fc/log/gelf_appender.hpp>
 #include <fc/reflect/variant.hpp>
+#include <fc/thread/thread.hpp>
 #include <fc/variant.hpp>
 #include <fc/io/json.hpp>
 #include <fc/crypto/city.hpp>
@@ -18,20 +19,13 @@
 
 namespace fc 
 {
-  namespace detail
-  {
-    boost::asio::ip::udp::endpoint to_asio_ep( const fc::ip::endpoint& e )
-    {
-      return boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4(e.get_address()), e.port() );
-    }
-  }
 
   class gelf_appender::impl : public retainable
   {
   public:
-    config                                    cfg;
-    optional<boost::asio::ip::udp::endpoint>  gelf_endpoint;
-    udp_socket                                gelf_socket;
+    config                     cfg;
+    optional<ip::endpoint>     gelf_endpoint;
+    udp_socket                 gelf_socket;
 
     impl(const config& c) : 
       cfg(c)
@@ -46,16 +40,12 @@ namespace fc
   gelf_appender::gelf_appender(const variant& args) :
     my(new impl(args.as<config>()))
   {
-  }
-
-  void gelf_appender::initialize(boost::asio::io_service &io_service)
-  {
     try
     {
       try
       {
         // if it's a numeric address:port, this will parse it
-        my->gelf_endpoint = detail::to_asio_ep(ip::endpoint::from_string(my->cfg.endpoint));
+        my->gelf_endpoint = ip::endpoint::from_string(my->cfg.endpoint);
       }
       catch (...)
       {
@@ -70,9 +60,9 @@ namespace fc
           uint16_t port = boost::lexical_cast<uint16_t>(my->cfg.endpoint.substr(colon_pos + 1, my->cfg.endpoint.size()));
 
           string hostname = my->cfg.endpoint.substr( 0, colon_pos );
-          auto endpoints = resolve(io_service, hostname, port);
+          std::vector<ip::endpoint> endpoints = resolve(hostname, port);
           if (endpoints.empty())
-              FC_THROW_EXCEPTION(unknown_host_exception, "The logging destination host name can not be resolved: ${hostname}",
+              FC_THROW_EXCEPTION(unknown_host_exception, "The host name can not be resolved: ${hostname}", 
                                  ("hostname", hostname));
           my->gelf_endpoint = endpoints.back();
         }
@@ -83,15 +73,11 @@ namespace fc
       }
 
       if (my->gelf_endpoint)
-      {
-        my->gelf_socket.initialize(io_service);
         my->gelf_socket.open();
-        std::cerr << "opened GELF socket to endpoint " << my->cfg.endpoint << "\n";
-      }
     }
     catch (...)
     {
-      std::cerr << "error opening GELF socket to endpoint " << my->cfg.endpoint << "\n";
+      std::cerr << "error opening GELF socket to endpoint ${endpoint}" << my->cfg.endpoint << "\n";
     }
   }
 

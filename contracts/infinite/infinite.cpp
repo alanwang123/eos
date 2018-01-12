@@ -1,38 +1,34 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #include <infinite/infinite.hpp> /// defines transfer struct (abi)
 
 namespace infinite {
-   using namespace eosio;
+   using namespace eos;
 
    ///  When storing accounts, check for empty balance and remove account
-   void store_account( account_name account_to_store, const account& a ) {
-      if( a.is_empty() ) {
+   void storeAccount( AccountName account, const Account& a ) {
+      if( a.isEmpty() ) {
          ///               value, scope
-         accounts::remove( a, account_to_store );
+         Accounts::remove( a, account );
       } else {
          ///              value, scope
-         accounts::store( a, account_to_store );
+         Accounts::store( a, account );
       }
    }
 
-   void apply_currency_transfer( const infinite::transfer& transfer ) {
-      require_notice( transfer.to, transfer.from );
-      require_auth( transfer.from );
+   void apply_currency_transfer( const infinite::Transfer& transfer ) {
+      requireNotice( transfer.to, transfer.from );
+      requireAuth( transfer.from );
 
-      auto from = get_account( transfer.from );
-      auto to   = get_account( transfer.to );
+      auto from = getAccount( transfer.from );
+      auto to   = getAccount( transfer.to );
 
-      while (from.balance > infinite::currency_tokens())
+      while (from.balance > infinite::CurrencyTokens())
       {
          from.balance -= transfer.quantity; /// token subtraction has underflow assertion
          to.balance   += transfer.quantity; /// token addition has overflow assertion
       }
 
-      store_account( transfer.from, from );
-      store_account( transfer.to, to );
+      storeAccount( transfer.from, from );
+      storeAccount( transfer.to, to );
    }
 
 }  // namespace infinite
@@ -41,18 +37,14 @@ using namespace infinite;
 
 extern "C" {
     void init()  {
-       account owned_account;
-       //Initialize currency account only if it does not exist
-       if ( !accounts::get( owned_account, N(currency) )) {
-          store_account( N(currency), account( currency_tokens(1000ll*1000ll*1000ll) ) );
-       }
+       storeAccount( N(currency), Account( CurrencyTokens(1000ll*1000ll*1000ll) ) );
     }
 
     /// The apply method implements the dispatch of events to this contract
     void apply( uint64_t code, uint64_t action ) {
        if( code == N(currency) ) {
-          if( action == N(transfer) )
-             infinite::apply_currency_transfer( current_message< infinite::transfer >() );
+          if( action == N(transfer) ) 
+             infinite::apply_currency_transfer( currentMessage< infinite::Transfer >() );
        }
     }
 }

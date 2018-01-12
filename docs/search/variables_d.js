@@ -1,4 +1,5 @@
 var searchData=
 [
-  ['owner',['owner',['../structdice_1_1offer__primary__key.html#ad060fb372bea546f038f1a14b11b9d82',1,'dice::offer_primary_key']]]
+  ['to',['to',['../struct_t_o_k_e_n___n_a_m_e_1_1_transfer.html#a75350616e02bd681c0e8b12ca4cf7a38',1,'TOKEN_NAME::Transfer::to()'],['../structeos_1_1_transfer.html#a034713fef29af790067be03d2f12d39b',1,'eos::Transfer::to()'],['../structsystem_1_1_transfer.html#a9c129ff0554816d5c8e8594f116dd0b0',1,'system::Transfer::to()']]],
+  ['total_5fvotes',['total_votes',['../struct_post_record.html#aca901b24573f6a0bf3e1058b197b6174',1,'PostRecord']]]
 ];

@@ -1,7 +1,3 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #include <algorithm>
 #include <vector>
 #include <iterator>
@@ -12,7 +8,7 @@
 #include <eos/chain/permission_object.hpp>
 #include <eos/chain/key_value_object.hpp>
 
-#include <eos/chain/producer_objects.hpp>
+#include <eos/native_contract/producer_objects.hpp>
 
 #include <eos/utilities/tempdir.hpp>
 
@@ -25,7 +21,7 @@
 
 #include "../common/database_fixture.hpp"
 
-using namespace eosio;
+using namespace eos;
 using namespace chain;
 
 BOOST_AUTO_TEST_SUITE(special_account_tests)
@@ -36,38 +32,38 @@ BOOST_FIXTURE_TEST_CASE(accounts_exists, testing_fixture)
 
       Make_Blockchain(chain);
 
-      auto nobody = chain_db.find<account_object, by_name>(config::nobody_account_name);
+      auto nobody = chain_db.find<account_object, by_name>(config::NobodyAccountName);
       BOOST_CHECK(nobody != nullptr);
-      const auto& nobody_active_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::nobody_account_name, config::active_name));
+      const auto& nobody_active_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::NobodyAccountName, config::ActiveName));
       BOOST_CHECK_EQUAL(nobody_active_authority.auth.threshold, 0);
       BOOST_CHECK_EQUAL(nobody_active_authority.auth.accounts.size(), 0);
       BOOST_CHECK_EQUAL(nobody_active_authority.auth.keys.size(), 0);
 
-      const auto& nobody_owner_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::nobody_account_name, config::owner_name));
+      const auto& nobody_owner_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::NobodyAccountName, config::OwnerName));
       BOOST_CHECK_EQUAL(nobody_owner_authority.auth.threshold, 0);
       BOOST_CHECK_EQUAL(nobody_owner_authority.auth.accounts.size(), 0);
       BOOST_CHECK_EQUAL(nobody_owner_authority.auth.keys.size(), 0);
 
       // TODO: check for anybody account
-      //auto anybody = chain_db.find<account_object, by_name>(config::anybody_account_name);
+      //auto anybody = chain_db.find<account_object, by_name>(config::AnybodyAccountName);
       //BOOST_CHECK(anybody == nullptr);
 
-      auto producers = chain_db.find<account_object, by_name>(config::producers_account_name);
+      auto producers = chain_db.find<account_object, by_name>(config::ProducersAccountName);
       BOOST_CHECK(producers != nullptr);
 
       auto& gpo = chain_db.get<global_property_object>();
 
-      const auto& producers_active_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::producers_account_name, config::active_name));
-      BOOST_CHECK_EQUAL(producers_active_authority.auth.threshold, config::producers_authority_threshold);
+      const auto& producers_active_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::ProducersAccountName, config::ActiveName));
+      BOOST_CHECK_EQUAL(producers_active_authority.auth.threshold, config::ProducersAuthorityThreshold);
       BOOST_CHECK_EQUAL(producers_active_authority.auth.accounts.size(), gpo.active_producers.size());
       BOOST_CHECK_EQUAL(producers_active_authority.auth.keys.size(), 0);
 
-      std::vector<account_name> active_auth;
+      std::vector<AccountName> active_auth;
       for(auto& apw : producers_active_authority.auth.accounts) {
          active_auth.emplace_back(apw.permission.account);
       }
 
-      std::vector<account_name> diff;
+      std::vector<AccountName> diff;
       std::set_difference(
          active_auth.begin(),
          active_auth.end(),
@@ -78,7 +74,7 @@ BOOST_FIXTURE_TEST_CASE(accounts_exists, testing_fixture)
 
       BOOST_CHECK_EQUAL(diff.size(), 0);
 
-      const auto& producers_owner_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::producers_account_name, config::owner_name));
+      const auto& producers_owner_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::ProducersAccountName, config::OwnerName));
       BOOST_CHECK_EQUAL(producers_owner_authority.auth.threshold, 0);
       BOOST_CHECK_EQUAL(producers_owner_authority.auth.accounts.size(), 0);
       BOOST_CHECK_EQUAL(producers_owner_authority.auth.keys.size(), 0);
@@ -90,25 +86,21 @@ BOOST_FIXTURE_TEST_CASE(producers_authority, testing_fixture)
 { try {
 
       Make_Blockchain(chain)
+      chain.produce_blocks();
 
       Make_Account(chain, alice);
       Make_Account(chain, bob);
       Make_Account(chain, charlie);
 
-      Make_Account(chain, newproducer1);
-      Make_Account(chain, newproducer2);
-      Make_Account(chain, newproducer3);
-      chain.produce_blocks();
-
-      Make_Producer(chain, newproducer1);
-      Make_Producer(chain, newproducer2);
-      Make_Producer(chain, newproducer3);
+      Make_Account(chain, newproducer1); Make_Producer(chain, newproducer1);
+      Make_Account(chain, newproducer2); Make_Producer(chain, newproducer2);
+      Make_Account(chain, newproducer3); Make_Producer(chain, newproducer3);
 
       Approve_Producer(chain, alice, newproducer1, true);
       Approve_Producer(chain, bob, newproducer2, true);
       Approve_Producer(chain, charlie, newproducer3, true);
 
-      chain.produce_blocks(config::blocks_per_round - chain.head_block_num() );
+      chain.produce_blocks(config::BlocksPerRound - chain.head_block_num() );
 
       auto& gpo = chain_db.get<global_property_object>();
 
@@ -116,17 +108,17 @@ BOOST_FIXTURE_TEST_CASE(producers_authority, testing_fixture)
       BOOST_REQUIRE(boost::find(gpo.active_producers, "newproducer2") != gpo.active_producers.end());
       BOOST_REQUIRE(boost::find(gpo.active_producers, "newproducer3") != gpo.active_producers.end());
 
-      const auto& producers_active_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::producers_account_name, config::active_name));
-      BOOST_CHECK_EQUAL(producers_active_authority.auth.threshold, config::producers_authority_threshold);
+      const auto& producers_active_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::ProducersAccountName, config::ActiveName));
+      BOOST_CHECK_EQUAL(producers_active_authority.auth.threshold, config::ProducersAuthorityThreshold);
       BOOST_CHECK_EQUAL(producers_active_authority.auth.accounts.size(), gpo.active_producers.size());
       BOOST_CHECK_EQUAL(producers_active_authority.auth.keys.size(), 0);
 
-      std::vector<account_name> active_auth;
+      std::vector<AccountName> active_auth;
       for(auto& apw : producers_active_authority.auth.accounts) {
          active_auth.emplace_back(apw.permission.account);
       }
 
-      std::vector<account_name> diff;
+      std::vector<AccountName> diff;
       std::set_difference(
          active_auth.begin(),
          active_auth.end(),
@@ -137,18 +129,12 @@ BOOST_FIXTURE_TEST_CASE(producers_authority, testing_fixture)
 
       BOOST_CHECK_EQUAL(diff.size(), 0);
 
-      const auto& producers_owner_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::producers_account_name, config::owner_name));
+      const auto& producers_owner_authority = chain_db.get<permission_object, by_owner>(boost::make_tuple(config::ProducersAccountName, config::OwnerName));
       BOOST_CHECK_EQUAL(producers_owner_authority.auth.threshold, 0);
       BOOST_CHECK_EQUAL(producers_owner_authority.auth.accounts.size(), 0);
       BOOST_CHECK_EQUAL(producers_owner_authority.auth.keys.size(), 0);
 
-#warning TODO: Approving producers currently not supported
-      BOOST_FAIL("voting was disabled, now it is working, remove this catch to not miss it being turned off again");
-   } catch (const fc::assert_exception& ex) {
-      BOOST_CHECK(ex.to_detail_string().find("voting") != std::string::npos);
-      BOOST_CHECK(ex.to_detail_string().find("disabled") != std::string::npos);
-   } FC_LOG_AND_RETHROW()
-}
+} FC_LOG_AND_RETHROW() }
 
 
 BOOST_AUTO_TEST_SUITE_END()

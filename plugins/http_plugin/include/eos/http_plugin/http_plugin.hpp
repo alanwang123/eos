@@ -1,13 +1,7 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <appbase/application.hpp>
 
-#include <fc/reflect/reflect.hpp>
-
-namespace eosio {
+namespace eos {
    using namespace appbase;
 
    /**
@@ -76,14 +70,4 @@ namespace eosio {
         std::unique_ptr<class http_plugin_impl> my;
    };
 
-   /**
-    * @brief Structure used to create JSON error responses
-    */
-   struct error_results {
-     uint16_t code;
-     string message;
-     string details;
-   };
 }
-
-FC_REFLECT(eosio::error_results, (code)(message)(details))

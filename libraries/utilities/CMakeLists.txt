@@ -22,10 +22,9 @@ set(sources
 add_library( eos_utilities
              ${sources}
              ${HEADERS} )
-target_link_libraries( eos_utilities fc WAST WASM )
+target_link_libraries( eos_utilities fc )
 target_include_directories( eos_utilities
-                            PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
-                                   "${CMAKE_CURRENT_SOURCE_DIR}/../wasm-jit/Include" )
+                            PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" )
 if (USE_PCH)
   set_target_properties(eos_utilities PROPERTIES COTIRE_ADD_UNITY_BUILD FALSE)
   cotire(eos_utilities)

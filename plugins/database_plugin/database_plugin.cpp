@@ -1,13 +1,9 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #include <eos/database_plugin/database_plugin.hpp>
 
 #include <fc/filesystem.hpp>
 #include <fc/log/logger.hpp>
 
-namespace eosio {
+namespace eos {
 
 class database_plugin_impl {
 public:

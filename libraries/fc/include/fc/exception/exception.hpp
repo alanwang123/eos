@@ -8,7 +8,6 @@
 #include <exception>
 #include <functional>
 #include <unordered_map>
-#include <boost/core/typeinfo.hpp>
 
 namespace fc
 {
@@ -384,7 +383,7 @@ namespace fc
       fc::exception fce( \
                 FC_LOG_MESSAGE( warn, "rethrow ${what}: ", ("what",e.what())), \
                 fc::std_exception_code,\
-                BOOST_CORE_TYPEID(e).name(), \
+                typeid(e).name(), \
                 e.what() ) ; \
       wlog( "${details}", ("details",fce.to_detail_string()) ); \
       throw fce;\
@@ -405,7 +404,7 @@ namespace fc
       fc::exception fce( \
                 FC_LOG_MESSAGE( warn, "rethrow ${what}: ", FC_FORMAT_ARG_PARAMS( __VA_ARGS__ )("what",e.what())), \
                 fc::std_exception_code,\
-                BOOST_CORE_TYPEID(e).name(), \
+                typeid(e).name(), \
                 e.what() ) ; \
       wlog( "${details}", ("details",fce.to_detail_string()) ); \
       wdump( __VA_ARGS__ ); \
@@ -427,7 +426,7 @@ namespace fc
       fc::exception fce( \
                 FC_LOG_MESSAGE( warn, "rethrow ${what}: ",FC_FORMAT_ARG_PARAMS( __VA_ARGS__  )("what",e.what()) ), \
                 fc::std_exception_code,\
-                BOOST_CORE_TYPEID(e).name(), \
+                typeid(e).name(), \
                 e.what() ) ; \
       wlog( "${details}", ("details",fce.to_detail_string()) ); \
       wdump( __VA_ARGS__ ); \
@@ -452,7 +451,7 @@ namespace fc
       fc::exception fce( \
                 FC_LOG_MESSAGE( LOG_LEVEL, "${what}: " FORMAT,__VA_ARGS__("what",e.what())), \
                 fc::std_exception_code,\
-                BOOST_CORE_TYPEID(e).name(), \
+                typeid(e).name(), \
                 e.what() ) ; throw fce;\
    } catch( ... ) {  \
       throw fc::unhandled_exception( \
@@ -467,7 +466,7 @@ namespace fc
       fc::exception fce( \
                 FC_LOG_MESSAGE( warn, "${what}: ",FC_FORMAT_ARG_PARAMS(__VA_ARGS__)("what",e.what())), \
                 fc::std_exception_code,\
-                BOOST_CORE_TYPEID(decltype(e)).name(), \
+                typeid(e).name(), \
                 e.what() ) ; throw fce;\
    } catch( ... ) {  \
       throw fc::unhandled_exception( \

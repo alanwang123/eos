@@ -1,7 +1,3 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #include <eos/types/native.hpp>
 #include <fc/crypto/base58.hpp>
 #include <fc/crypto/ripemd160.hpp>
@@ -10,23 +6,23 @@
 #include <fc/reflect/variant.hpp>
 
 namespace fc {
-  void to_variant(const eosio::types::name& c, fc::variant& v) { v = std::string(c); }
-  void from_variant(const fc::variant& v, eosio::types::name& check) { check = v.get_string(); }
+  void to_variant(const eos::types::Name& c, fc::variant& v) { v = std::string(c); }
+  void from_variant(const fc::variant& v, eos::types::Name& check) { check = v.get_string(); }
 
-  void to_variant(const std::vector<eosio::types::field>& c, fc::variant& v) {
+  void to_variant(const std::vector<eos::types::Field>& c, fc::variant& v) {
      fc::mutable_variant_object mvo; mvo.reserve(c.size());
      for(const auto& f : c) {
-        mvo.set(f.name, eosio::types::string(f.type));
+        mvo.set(f.name, eos::types::String(f.type));
      }
      v = std::move(mvo);
   }
-  void from_variant(const fc::variant& v, std::vector<eosio::types::field>& fields) {
+  void from_variant(const fc::variant& v, std::vector<eos::types::Field>& fields) {
      const auto& obj = v.get_object();
      fields.reserve(obj.size());
      for(const auto& f : obj)
-        fields.emplace_back(eosio::types::field{ f.key(), f.value().get_string() });
+        fields.emplace_back(eos::types::Field{ f.key(), f.value().get_string() });
   }
-  void to_variant(const std::map<std::string,eosio::types::struct_t>& c, fc::variant& v)
+  void to_variant(const std::map<std::string,eos::types::Struct>& c, fc::variant& v)
   {
      fc::mutable_variant_object mvo; mvo.reserve(c.size());
      for(const auto& item : c) {
@@ -37,7 +33,7 @@ namespace fc {
      }
      v = std::move(mvo);
   }
-  void from_variant(const fc::variant& v, std::map<std::string,eosio::types::struct_t>& structs) {
+  void from_variant(const fc::variant& v, std::map<std::string,eos::types::Struct>& structs) {
      const auto& obj = v.get_object();
      structs.clear();
      for(const auto& f : obj) {
@@ -51,10 +47,10 @@ namespace fc {
   }
 }
 
-bool eosio::types::field::operator==(const eosio::types::field& other) const {
+bool eos::types::Field::operator==(const eos::types::Field& other) const {
    return std::tie(name, type) == std::tie(other.name, other.type);
 }
 
-bool eosio::types::struct_t::operator==(const eosio::types::struct_t& other) const {
+bool eos::types::Struct::operator==(const eos::types::Struct& other) const {
    return std::tie(name, base, fields) == std::tie(other.name, other.base, other.fields);
 }

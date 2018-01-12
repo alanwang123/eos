@@ -1,12 +1,8 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <fc/filesystem.hpp>
 #include <eos/chain/block.hpp>
 
-namespace eosio { namespace chain {
+namespace eos { namespace chain {
 
    namespace detail { class block_log_impl; }
 

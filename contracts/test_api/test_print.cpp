@@ -1,7 +1,3 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #include <eoslib/eos.hpp>
 
 #include "test_api.hpp"
@@ -41,8 +37,8 @@ unsigned int test_print::test_printn() {
   printn(N(AAAAAA));
   printn(N(abcdefghijk));
   printn(N(abcdefghijkl));
-  printn(N(abcdefghijkl1));
-  printn(N(abcdefghijkl12));
-  printn(N(abcdefghijkl123));
+  printn(N(abcdefghijklm));
+  printn(N(abcdefghijklmn));
+  printn(N(abcdefghijklmno));
   return WASM_TEST_PASS;
 }

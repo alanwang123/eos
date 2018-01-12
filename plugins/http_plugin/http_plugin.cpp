@@ -1,13 +1,7 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #include <eos/http_plugin/http_plugin.hpp>
 
 #include <fc/network/ip.hpp>
 #include <fc/log/logger_config.hpp>
-#include <fc/reflect/variant.hpp>
-#include <fc/io/json.hpp>
 
 #include <boost/asio.hpp>
 #include <boost/optional.hpp>
@@ -22,7 +16,7 @@
 #include <thread>
 #include <memory>
 
-namespace eosio {
+namespace eos {
    namespace asio = boost::asio;
 
    using std::map;
@@ -82,13 +76,10 @@ namespace eosio {
 
    class http_plugin_impl {
       public:
-         //shared_ptr<std::thread>  http_thread;
-         //asio::io_service         http_ios;
+         shared_ptr<std::thread>  http_thread;
+         asio::io_service         http_ios;
          map<string,url_handler>  url_handlers;
          optional<tcp::endpoint>  listen_endpoint;
-         string                   access_control_allow_origin;
-         string                   access_control_allow_headers;
-         bool                     access_control_allow_credentials = false;
 
          websocket_server_type    server;
    };
@@ -98,41 +89,21 @@ namespace eosio {
 
    void http_plugin::set_program_options(options_description&, options_description& cfg) {
       cfg.add_options()
-            ("http-server-address", bpo::value<string>()->default_value("127.0.0.1:8888"),
+            ("http-server-endpoint", bpo::value<string>()->default_value("127.0.0.1:8888"),
              "The local IP and port to listen for incoming http connections.")
-
-            ("access-control-allow-origin", bpo::value<string>()->notifier([this](const string& v) {
-                my->access_control_allow_origin = v;
-                ilog("configured http with Access-Control-Allow-Origin: ${o}", ("o", my->access_control_allow_origin));
-             }),
-             "Specify the Access-Control-Allow-Origin to be returned on each request.")
-
-
-            ("access-control-allow-headers", bpo::value<string>()->notifier([this](const string& v) {
-                my->access_control_allow_headers = v;
-                ilog("configured http with Access-Control-Allow-Headers : ${o}", ("o", my->access_control_allow_headers));
-             }),
-             "Specify the Access-Control-Allow-Headers to be returned on each request.")
-
-            ("access-control-allow-credentials",
-             bpo::bool_switch()->notifier([this](bool v) {
-                my->access_control_allow_credentials = v;
-                if (v) ilog("configured http with Access-Control-Allow-Credentials: true");
-             })->default_value(false),
-             "Specify if Access-Control-Allow-Credentials: true should be returned on each request.")
             ;
    }
 
    void http_plugin::plugin_initialize(const variables_map& options) {
-      if(options.count("http-server-address")) {
+      if(options.count("http-server-endpoint")) {
         #if 0
-         auto lipstr = options.at("http-server-address").as< string >();
+         auto lipstr = options.at("http-server-endpoint").as< string >();
          auto fcep = fc::ip::endpoint::from_string(lipstr);
          my->listen_endpoint = tcp::endpoint(boost::asio::ip::address_v4::from_string((string)fcep.get_address()), fcep.port());
         #endif
          auto resolver = std::make_shared<tcp::resolver>( std::ref( app().get_io_service() ) );
-         if( options.count( "http-server-address" ) ) {
-           auto lipstr =  options.at("http-server-address").as< string >();
+         if( options.count( "http-server-endpoint" ) ) {
+           auto lipstr =  options.at("http-server-endpoint").as< string >();
            auto host = lipstr.substr( 0, lipstr.find(':') );
            auto port = lipstr.substr( host.size()+1, lipstr.size() );
            idump((host)(port));
@@ -149,29 +120,19 @@ namespace eosio {
    void http_plugin::plugin_startup() {
       if(my->listen_endpoint) {
 
-         //my->http_thread = std::make_shared<std::thread>([&](){
+         my->http_thread = std::make_shared<std::thread>([&](){
             ilog("start processing http thread");
             try {
                my->server.clear_access_channels(websocketpp::log::alevel::all);
-               my->server.init_asio(&app().get_io_service()); //&my->http_ios);
+               my->server.init_asio(&my->http_ios);
                my->server.set_reuse_addr(true);
 
                my->server.set_http_handler([&](connection_hdl hdl) {
                   auto con = my->server.get_con_from_hdl(hdl);
                   try {
-                     //ilog("handle http request: ${url}", ("url",con->get_uri()->str()));
-                     //ilog("${body}", ("body", con->get_request_body()));
+                     ilog("handle http request: ${url}", ("url",con->get_uri()->str()));
+                     ilog("${body}", ("body", con->get_request_body()));
 
-                     if (!my->access_control_allow_origin.empty()) {
-                        con->append_header("Access-Control-Allow-Origin", my->access_control_allow_origin);
-                     }
-                     if (!my->access_control_allow_headers.empty()) {
-                        con->append_header("Access-Control-Allow-Headers", my->access_control_allow_headers);
-                     }
-                     if (my->access_control_allow_credentials) {
-                        con->append_header("Access-Control-Allow-Credentials", "true");
-                     }
-                     con->append_header("Content-type", "application/json");
                      auto body = con->get_request_body();
                      auto resource = con->get_uri()->get_resource();
                      auto handler_itr = my->url_handlers.find(resource);
@@ -182,28 +143,20 @@ namespace eosio {
                         });
                      } else {
                         wlog("404 - not found: ${ep}", ("ep",resource));
-                        error_results results{websocketpp::http::status_code::not_found,
-                                              "Not Found", "Unknown Endpoint"};
-                        con->set_body(fc::json::to_string(results));
+                        con->set_body("Unknown Endpoint");
                         con->set_status(websocketpp::http::status_code::not_found);
                      }
                   } catch( const fc::exception& e ) {
                      elog( "http: ${e}", ("e",e.to_detail_string()));
-                     error_results results{websocketpp::http::status_code::internal_server_error,
-                                           "Internal Service Error", e.to_detail_string()};
-                     con->set_body(fc::json::to_string(results));
-                     con->set_status(websocketpp::http::status_code::internal_server_error);
+                        con->set_body(e.to_detail_string());
+                        con->set_status(websocketpp::http::status_code::internal_server_error);
                   } catch( const std::exception& e ) {
                      elog( "http: ${e}", ("e",e.what()));
-                     error_results results{websocketpp::http::status_code::internal_server_error,
-                                           "Internal Service Error", e.what()};
-                     con->set_body(fc::json::to_string(results));
-                     con->set_status(websocketpp::http::status_code::internal_server_error);
+                        con->set_body(e.what());
+                        con->set_status(websocketpp::http::status_code::internal_server_error);
                   } catch( ... ) {
-                     error_results results{websocketpp::http::status_code::internal_server_error,
-                                           "Internal Service Error", "unknown exception"};
-                     con->set_body(fc::json::to_string(results));
-                     con->set_status(websocketpp::http::status_code::internal_server_error);
+                        con->set_body("unknown exception");
+                        con->set_status(websocketpp::http::status_code::internal_server_error);
                   }
                });
 
@@ -211,7 +164,7 @@ namespace eosio {
                my->server.listen(*my->listen_endpoint);
                my->server.start_accept();
 
-           //    my->http_ios.run();
+               my->http_ios.run();
                ilog("http io service exit");
             } catch ( const fc::exception& e ){
                elog( "http: ${e}", ("e",e.to_detail_string()));
@@ -220,24 +173,24 @@ namespace eosio {
             } catch (...) {
                 elog("error thrown from http io service");
             }
-         //});
+         });
 
       }
    }
 
    void http_plugin::plugin_shutdown() {
-     // if(my->http_thread) {
+      if(my->http_thread) {
          if(my->server.is_listening())
              my->server.stop_listening();
-     //    my->http_ios.stop();
-     //    my->http_thread->join();
-     //    my->http_thread.reset();
-     // }
+         my->http_ios.stop();
+         my->http_thread->join();
+         my->http_thread.reset();
+      }
    }
 
    void http_plugin::add_handler(const string& url, const url_handler& handler) {
       ilog( "add api url: ${c}", ("c",url) );
-      app().get_io_service().post([=](){
+      my->http_ios.post([=](){
         my->url_handlers.insert(std::make_pair(url,handler));
       });
    }

@@ -1,11 +1,7 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <eos/types/native.hpp>
 
-namespace eosio { namespace types {
+namespace eos { namespace types {
    class InputDatastream;
    class OutputDatastream;
 
@@ -70,4 +66,4 @@ namespace eosio { namespace types {
 
    };
 
-}} /// namespace eosio::types
+}} /// namespace eos::types

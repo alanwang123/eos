@@ -1,4 +1,3 @@
-file(GLOB ABI_FILES "*.abi")
-add_wast_target(exchange "${CMAKE_SOURCE_DIR}/contracts" ${CMAKE_CURRENT_BINARY_DIR})
-configure_file("${ABI_FILES}" "${CMAKE_CURRENT_BINARY_DIR}" COPYONLY)
+file(GLOB SOURCE_FILES "*.cpp")
+add_wast_target(exchange "${SOURCE_FILES}" "${CMAKE_SOURCE_DIR}/contracts" ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies( exchange currency )

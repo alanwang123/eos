@@ -1,15 +1,11 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
-namespace eosio { namespace types {
+namespace eos { namespace types {
    template<typename T>
    fc::variant toVariant( const vector<T>& a ) {
       vector<fc::variant> result;
       result.reserve( a.size() );
       for( const auto& v : a )
-         result.emplace_back( eosio::toVariant( v ) );
+         result.emplace_back( EOS::toVariant( v ) );
       return fc::variant( std::move(result) );
    }
 
@@ -18,7 +14,7 @@ namespace eosio { namespace types {
       uint32_t len = a.size();
       s.write( (const char*)&len, sizeof(len) );
       for( const auto& v : a )
-         eosio::toBinary( s, v );
+         EOS::toBinary( s, v );
    }
 
    template<typename Stream, typename T>
@@ -27,7 +23,7 @@ namespace eosio { namespace types {
       s.read( (char*)&len, sizeof(len) );
       a.resize(len);
       for( auto& v : a )
-         eosio::fromBinary( s, v );
+         EOS::fromBinary( s, v );
    }
 
    template<typename T>
@@ -35,14 +31,14 @@ namespace eosio { namespace types {
       const auto& a = v.get_array();
       data.resize( a.size() );
       for( uint32_t i = 0; i < a.size(); ++i )
-         eosio::fromVariant( data[i], a[i] );
+         EOS::fromVariant( data[i], a[i] );
    }
 
    template<typename T>
    T Bytes::as()const {
      fc::datastream<const char*> ds( value.data(), value.size() );
      T result;
-     eosio::fromBinary( ds, result );
+     EOS::fromBinary( ds, result );
      return result;
    }
-}} // namespace eosio::types
+}} // namespace eos::types

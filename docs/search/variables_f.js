@@ -1,5 +1,9 @@
 var searchData=
 [
-  ['quantity',['quantity',['../group__currencyapi.html#ga637bc5a749449e7f478f6620160f4795',1,'TOKEN_NAME::transfer::quantity()'],['../structeosio_1_1token.html#a9849d728bf72ca934962865f0d9881d2',1,'eosio::token::quantity()'],['../structinfinite_1_1transfer.html#a2b72eb47bcc8f3221dd5a622c0169e63',1,'infinite::transfer::quantity()'],['../group__storageapi.html#gaa19dbd7b8beace25c91d274519166a37',1,'TOKEN_NAME::transfer::quantity()']]],
-  ['quote',['quote',['../structprice.html#ad266b6515f7c10c3bf8ad1f17261163c',1,'price']]]
+  ['scope',['scope',['../eosc_8dox.html#a2c4c54e7eeee8a40f53dcbfde0dcab27',1,'eosc.dox']]],
+  ['signatures',['signatures',['../eosc_8dox.html#aa310f5ce702670d4a6848f2dfefcd906',1,'eosc.dox']]],
+  ['social',['social',['../struct_account.html#a9b3193bc138c923876e5f598bfd7897b',1,'Account']]],
+  ['social_5fpower',['social_power',['../struct_account.html#aa9dfb41c50dc90cbb590f3902b35d6a3',1,'Account']]],
+  ['staked_5fbalance',['staked_balance',['../eosc_8dox.html#a368a626b05f5ae8a03a0e41d2d8354f5',1,'eosc.dox']]],
+  ['sync_5ftransactions',['sync_transactions',['../eosc_8dox.html#ac0629d8b3e4b4902b3a7dbc656aa5b91',1,'eosc.dox']]]
 ];

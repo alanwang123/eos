@@ -2,12 +2,23 @@
 #INCLUDE(GetPrerequisites)
 #INCLUDE(VersionMacros)
 
-SET( DEFAULT_HEADER_INSTALL_DIR include/${target} )
+SET( DEFAULT_HEADER_INSTALL_DIR include/\${target} )
 SET( DEFAULT_LIBRARY_INSTALL_DIR lib/ )
 SET( DEFAULT_EXECUTABLE_INSTALL_DIR bin/ )
 SET( CMAKE_DEBUG_POSTFIX _debug )
 SET( BUILD_SHARED_LIBS NO )
 SET( ECC_IMPL secp256k1 CACHE STRING "secp256k1 or openssl or mixed" )
+
+
+IF(NOT "$ENV{SECP256K1_ROOT_DIR}" STREQUAL "")
+  set(SECP256K1_ROOT_DIR $ENV{SECP256K1_ROOT_DIR} )
+  set(SECP256K1_INCLUDE_DIR ${SECP256K1_ROOT_DIR}/include)
+ELSE()
+  SET( SECP256K1_INCLUDE_DIR /usr/local/include )
+  SET( SECP256K1_ROOT_DIR /usr/local )
+ENDIF()
+
+message(STATUS "Setting up SECP256K1 root and include vars to ${SECP256K1_ROOT_DIR}, ${SECP256K1_INCLUDE_DIR}")
 
 set(platformBitness 32)
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -16,13 +27,10 @@ endif()
 
 SET (ORIGINAL_LIB_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
 
-find_package(Secp256k1 REQUIRED)
-find_package(GMP REQUIRED)
-
 IF( ECC_IMPL STREQUAL openssl )
   SET( ECC_REST src/crypto/elliptic_impl_pub.cpp )
 ELSE( ECC_IMPL STREQUAL openssl )
-  SET( ECC_LIB ${Secp256k1_LIBRARY} ${GMP_LIBRARIES} )
+  SET( ECC_LIB secp256k1 )
   IF( ECC_IMPL STREQUAL mixed )
     SET( ECC_REST src/crypto/elliptic_impl_priv.cpp src/crypto/elliptic_impl_pub.cpp )
   ELSE( ECC_IMPL STREQUAL mixed )
@@ -49,6 +57,8 @@ ENDIF()
 
 find_package(OpenSSL REQUIRED)
 
+find_package(Secp256k1 REQUIRED)
+
 set( CMAKE_FIND_LIBRARY_SUFFIXES ${ORIGINAL_LIB_SUFFIXES} )
 
 set( fc_sources
@@ -65,7 +75,6 @@ set( fc_sources
      src/io/json.cpp
      src/io/varint.cpp
      src/io/fstream.cpp
-     src/io/console.cpp
      src/filesystem.cpp
      src/interprocess/file_mapping.cpp
      src/interprocess/mmap_struct.cpp
@@ -73,7 +82,6 @@ set( fc_sources
      src/log/logger.cpp
      src/log/appender.cpp
      src/log/console_appender.cpp
-     src/log/gelf_appender.cpp
      src/log/logger_config.cpp
      src/crypto/_digest_common.cpp
      src/crypto/openssl.cpp
@@ -98,8 +106,6 @@ set( fc_sources
      src/crypto/elliptic_${ECC_IMPL}.cpp
      src/crypto/rand.cpp
      src/network/ip.cpp
-     src/network/resolve.cpp
-     src/network/udp_socket.cpp
      src/network/url.cpp
      src/compress/smaz.cpp
      src/compress/zlib.cpp
@@ -115,15 +121,8 @@ set( sources
 #list(APPEND sources "${CMAKE_CURRENT_BINARY_DIR}/git_revision.cpp")
 list(APPEND sources ${fc_headers})
 
-setup_library( fc SOURCES ${sources} LIBRARY_TYPE STATIC )
+setup_library( fc SOURCES ${sources} LIBRARY_TYPE STATIC DONT_INSTALL_LIBRARY )
 
-INSTALL( TARGETS fc
-   RUNTIME DESTINATION bin
-   LIBRARY DESTINATION lib
-   ARCHIVE DESTINATION lib
-)
-INSTALL( DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include DESTINATION . )
-  
 IF(APPLE)
   # As of 10.10 yosemite, the OpenSSL static libraries shipped with os x have a dependency
   # on zlib, so any time you link in openssl you also need to link zlib.  .  We really want to detect whether openssl was configured with the --no-zlib
@@ -159,7 +158,7 @@ target_include_directories(fc
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${Boost_INCLUDE_DIR}
     ${OPENSSL_INCLUDE_DIR}
-    ${Secp256k1_INCLUDE_DIR}
+    ${SECP256K1_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/websocketpp
 
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}

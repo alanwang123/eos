@@ -1,30 +1,21 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <eoslib/types.h>
-
-namespace  eosio {
+  
+namespace  eos {
 
    /**
-    *  @brief Converts a base32 symbol into its binary representation, used by string_to_name()
-    *
-    *  @details Converts a base32 symbol into its binary representation, used by string_to_name()
-    *  @ingroup types
+    *  Converts a base32 symbol into its binary representation, used by string_to_name()
     */
    static constexpr char char_to_symbol( char c ) {
       if( c >= 'a' && c <= 'z' )
-         return (c - 'a') + 6;
+         return (c - 'a') + 1;
       if( c >= '1' && c <= '5' )
-         return (c - '1') + 1;
+         return (c - '1') + 27;
       return 0;
    }
 
    /**
-    *  @brief Converts a base32 string to a uint64_t. 
-    *
-    *  @details Converts a base32 string to a uint64_t. This is a constexpr so that
+    *  Converts a base32 string to a uint64_t. This is a constexpr so that
     *  this method can be used in template arguments as well.
     *
     *  @ingroup types
@@ -58,26 +49,24 @@ namespace  eosio {
     * @brief used to generate a compile time uint64_t from the base32 encoded string interpretation of X
     * @ingroup types
     */
-   #define N(X) ::eosio::string_to_name(#X)
+   #define N(X) ::eos::string_to_name(#X)
 
    /**
-    *  @brief wraps a uint64_t to ensure it is only passed to methods that expect a Name
-    *  @details wraps a uint64_t to ensure it is only passed to methods that expect a Name and
+    *  @class Name
+    *  @brief wraps a uint64_t to ensure it is only passed to methods that expect a Name and
     *         that no mathematical operations occur.  It also enables specialization of print
     *         so that it is printed as a base32 string.
     *
     *  @ingroup types
-    *  @{
     */
-   struct name {
-      name( uint64_t v = 0 ): value(v) {}
+   struct Name {
+      Name( uint64_t v = 0 ): value(v) {}
       operator uint64_t()const { return value; }
 
-      friend bool operator==( const name& a, const name& b ) { return a.value == b.value; }
-      account_name value = 0;
+      friend bool operator==( const Name& a, const Name& b ) { return a.value == b.value; }
+      AccountName value = 0;
    };
 
-   /// @}
 
    /**
     * @ingroup types

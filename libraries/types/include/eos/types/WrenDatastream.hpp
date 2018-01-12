@@ -1,11 +1,7 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <fc/io/datastream.hpp>
 
-namespace eosio { namespace types {
+namespace eos { namespace types {
    using fc::datastream;
 
    struct InputDatastream {
@@ -82,4 +78,4 @@ namespace eosio { namespace types {
       uint32_t tellp()const { return ds.tellp(); }
    };
 
-}} // namespace eosio::types
+}} // namespace eos::types
