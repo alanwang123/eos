@@ -1,1101 +1,1915 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
-#include <boost/function.hpp>
-#include <boost/multiprecision/cpp_bin_float.hpp>
-#include <eos/chain/wasm_interface.hpp>
-#include <eos/chain/chain_controller.hpp>
-#include <eos/chain/rate_limiting_object.hpp>
-#include "Platform/Platform.h"
-#include "WAST/WAST.h"
-#include "Runtime/Runtime.h"
-#include "Runtime/Linker.h"
-#include "Runtime/Intrinsics.h"
-#include "IR/Module.h"
-#include "IR/Operators.h"
-#include "IR/Validate.h"
-#include <eos/chain/key_value_object.hpp>
-#include <eos/chain/account_object.hpp>
-#include <eos/chain/balance_object.hpp>
-#include <eos/chain/staked_balance_objects.hpp>
-#include <eos/types/abi_serializer.hpp>
-#include <chrono>
-#include <boost/lexical_cast.hpp>
-#include <fc/utf8.hpp>
+#include <eosio/chain/wasm_interface.hpp>
+#include <eosio/chain/apply_context.hpp>
+#include <eosio/chain/controller.hpp>
+#include <eosio/chain/transaction_context.hpp>
+#include <eosio/chain/producer_schedule.hpp>
+#include <eosio/chain/exceptions.hpp>
+#include <boost/core/ignore_unused.hpp>
+#include <eosio/chain/authorization_manager.hpp>
+#include <eosio/chain/resource_limits.hpp>
+#include <eosio/chain/wasm_interface_private.hpp>
+#include <eosio/chain/wasm_eosio_validation.hpp>
+#include <eosio/chain/wasm_eosio_injection.hpp>
+#include <eosio/chain/global_property_object.hpp>
+#include <eosio/chain/account_object.hpp>
+#include <fc/exception/exception.hpp>
+#include <fc/crypto/sha256.hpp>
+#include <fc/crypto/sha1.hpp>
+#include <fc/io/raw.hpp>
+
+#include <softfloat.hpp>
+#include <compiler_builtins.hpp>
+#include <boost/asio.hpp>
+#include <boost/bind.hpp>
+#include <fstream>
 
 namespace eosio { namespace chain {
-   using namespace IR;
-   using namespace Runtime;
-   typedef boost::multiprecision::cpp_bin_float_50 DOUBLE;
-   const uint32_t bytes_per_mbyte = 1024 * 1024;
+   using namespace webassembly;
+   using namespace webassembly::common;
 
-   class wasm_memory
-   {
-   public:
-      explicit wasm_memory(wasm_interface& interface);
-      wasm_memory(const wasm_memory&) = delete;
-      wasm_memory(wasm_memory&&) = delete;
-      ~wasm_memory();
-      U32 sbrk(I32 num_bytes);
-   private:
-      static U32 limit_32bit_address(Uptr address);
+   wasm_interface::wasm_interface(vm_type vm) : my( new wasm_interface_impl(vm) ) {}
 
-      static const U32 _max_memory = 1024 * 1024;
-      wasm_interface& _wasm_interface;
-      Uptr _num_pages;
-      const U32 _min_bytes;
-      U32 _num_bytes;
-   };
+   wasm_interface::~wasm_interface() {}
 
-   // account.h/hpp expected account API balance interchange format
-   // must match account.hpp account_balance definition
-   PACKED_STRUCT(
-   struct account_balance
-   {
-      /**
-      * Name of the account who's balance this is
-      */
-      account_name account;
-
-      /**
-      * Balance for this account
-      */
-      asset eos_balance;
-
-      /**
-      * Staked balance for this account
-      */
-      asset staked_balance;
-
-      /**
-      * Unstaking balance for this account
-      */
-      asset unstaking_balance;
-
-      /**
-      * Time at which last unstaking occurred for this account
-      */
-      time last_unstaking_time;
-   })
-
-   wasm_interface::wasm_interface() {
-   }
-
-   wasm_interface::key_type wasm_interface::to_key_type(const types::type_name& type_name)
-   {
-      if ("str" == type_name)
-         return str;
-      if ("i64" == type_name)
-         return i64;
-      if ("i128i128" == type_name)
-         return i128i128;
-      if ("i64i64i64" == type_name)
-         return i64i64i64;
-
-      return invalid_key_type;
-   }
-
-   std::string wasm_interface::to_type_name(key_type key_type)
-   {
-      switch (key_type)
-      {
-      case str:
-         return "str";
-      case i64:
-         return "i64";
-      case i128i128:
-         return "i128i128";
-      case i64i64i64:
-         return "i64i64i64";
-      default:
-         return std::string("<invalid key type - ") + boost::lexical_cast<std::string>(int(key_type)) + ">";
+   void wasm_interface::validate(const controller& control, const bytes& code) {
+      Module module;
+      try {
+         Serialization::MemoryInputStream stream((U8*)code.data(), code.size());
+         WASM::serialize(stream, module);
+      } catch(const Serialization::FatalSerializationException& e) {
+         EOS_ASSERT(false, wasm_serialization_error, e.message.c_str());
+      } catch(const IR::ValidationException& e) {
+         EOS_ASSERT(false, wasm_serialization_error, e.message.c_str());
       }
+
+      wasm_validations::wasm_binary_validation validator(control, module);
+      validator.validate();
+
+      root_resolver resolver(true);
+      LinkResult link_result = linkModule(module, resolver);
+
+      //there are a couple opportunties for improvement here--
+      //Easy: Cache the Module created here so it can be reused for instantiaion
+      //Hard: Kick off instantiation in a separate thread at this location
+	 }
+
+   void wasm_interface::apply( const digest_type& code_id, const shared_string& code, apply_context& context ) {
+      my->get_instantiated_module(code_id, code, context.trx_context)->apply(context);
    }
 
-#ifdef NDEBUG
-   const int CHECKTIME_LIMIT = 3000;
-#else
-   const int CHECKTIME_LIMIT = 18000;
+   wasm_instantiated_module_interface::~wasm_instantiated_module_interface() {}
+   wasm_runtime_interface::~wasm_runtime_interface() {}
+
+#if defined(assert)
+   #undef assert
 #endif
 
-   void checktime(int64_t duration, uint32_t checktime_limit)
-   {
-      if (duration > checktime_limit) {
-         wlog("checktime called ${d}", ("d", duration));
-         throw checktime_exceeded();
-      }
-   }
-
-DEFINE_INTRINSIC_FUNCTION0(env,checktime,checktime,none) {
-   checktime(wasm_interface::get().current_execution_time(), wasm_interface::get().checktime_limit);
-}
-
-   template <typename Function, typename KeyType, int numberOfKeys>
-   int32_t validate(int32_t valueptr, int32_t valuelen, Function func) {
-
-      static const uint32_t keylen = numberOfKeys*sizeof(KeyType);
-
-      FC_ASSERT( valuelen >= keylen, "insufficient data passed" );
-
-      auto& wasm  = wasm_interface::get();
-      FC_ASSERT( wasm.current_apply_context, "no apply context found" );
-
-      char* value = memoryArrayPtr<char>( wasm.current_memory, valueptr, valuelen );
-      KeyType*  keys = reinterpret_cast<KeyType*>(value);
-
-      valuelen -= keylen;
-      value    += keylen;
-
-      return func(wasm.current_apply_context, keys, value, valuelen);
-   }
-
-   template <typename Function>
-   int32_t validate_str(int32_t keyptr, int32_t keylen, int32_t valueptr, int32_t valuelen, Function func) {
-
-      auto& wasm  = wasm_interface::get();
-      FC_ASSERT( wasm.current_apply_context, "no apply context found" );
-
-      char* key   = memoryArrayPtr<char>( wasm.current_memory, keyptr, keylen );
-      char* value = memoryArrayPtr<char>( wasm.current_memory, valueptr, valuelen );
-
-      std::string keys(key, keylen);
-
-      return func(wasm.current_apply_context, &keys, value, valuelen);
-   }
-
-   int64_t round_to_byte_boundary(int64_t bytes)
-   {
-      const unsigned int byte_boundary = sizeof(uint64_t);
-      int64_t remainder = bytes % byte_boundary;
-      if (remainder > 0)
-         bytes += byte_boundary - remainder;
-      return bytes;
-   }
-
-#define VERIFY_TABLE(TYPE) \
-   const auto table_name = name(table); \
-   auto& wasm  = wasm_interface::get(); \
-   if (wasm.table_key_types) \
-   { \
-      auto table_key = wasm.table_key_types->find(table_name); \
-      if (table_key == wasm.table_key_types->end()) \
-      { \
-         FC_ASSERT(!wasm.tables_fixed, "abi did not define table ${t}", ("t", table_name)); \
-         wasm.table_key_types->emplace(std::make_pair(table_name,wasm_interface::TYPE)); \
-      } \
-      else \
-      { \
-         FC_ASSERT(wasm_interface::TYPE == table_key->second, "abi definition for ${table} expects \"${type}\", but code is requesting \"" #TYPE "\"", ("table",table_name)("type",wasm_interface::to_type_name(table_key->second))); \
-      } \
-   }
-
-#define READ_RECORD(READFUNC, INDEX, SCOPE) \
-   auto lambda = [&](apply_context* ctx, INDEX::value_type::key_type* keys, char *data, uint32_t datalen) -> int32_t { \
-      auto res = ctx->READFUNC<INDEX, SCOPE>( name(scope), name(code), table_name, keys, data, datalen); \
-      if (res >= 0) res += INDEX::value_type::number_of_keys*sizeof(INDEX::value_type::key_type); \
-      return res; \
-   }; \
-   return validate<decltype(lambda), INDEX::value_type::key_type, INDEX::value_type::number_of_keys>(valueptr, valuelen, lambda);
-
-#define UPDATE_RECORD(UPDATEFUNC, INDEX, DATASIZE) \
-   auto lambda = [&](apply_context* ctx, INDEX::value_type::key_type* keys, char *data, uint32_t datalen) -> int32_t { \
-      return ctx->UPDATEFUNC<INDEX::value_type>( name(scope), name(ctx->code.value), table_name, keys, data, datalen); \
-   }; \
-   const int32_t ret = validate<decltype(lambda), INDEX::value_type::key_type, INDEX::value_type::number_of_keys>(valueptr, DATASIZE, lambda);
-
-#define DEFINE_RECORD_UPDATE_FUNCTIONS(OBJTYPE, INDEX, KEY_SIZE) \
-   DEFINE_INTRINSIC_FUNCTION4(env,store_##OBJTYPE,store_##OBJTYPE,i32,i64,scope,i64,table,i32,valueptr,i32,valuelen) { \
-      VERIFY_TABLE(OBJTYPE) \
-      UPDATE_RECORD(store_record, INDEX, valuelen); \
-      /* ret is -1 if record created, or else it is the length of the data portion of the originally stored */ \
-      /* structure (it does not include the key portion */ \
-      const bool created = (ret == -1); \
-      int64_t& storage = wasm_interface::get().table_storage; \
-      if (created) \
-         storage += round_to_byte_boundary(valuelen) + wasm_interface::get().row_overhead_db_limit_bytes; \
-      else \
-         /* need to calculate the difference between the original rounded byte size and the new rounded byte size */ \
-         storage += round_to_byte_boundary(valuelen) - round_to_byte_boundary(KEY_SIZE + ret); \
-\
-      EOS_ASSERT(storage <= (wasm_interface::get().per_code_account_max_db_limit_mbytes * bytes_per_mbyte), \
-                 tx_code_db_limit_exceeded, \
-                 "Database limit exceeded for account=${name}",("name", name(wasm_interface::get().current_apply_context->code.value))); \
-      return created ? 1 : 0; \
-   } \
-   DEFINE_INTRINSIC_FUNCTION4(env,update_##OBJTYPE,update_##OBJTYPE,i32,i64,scope,i64,table,i32,valueptr,i32,valuelen) { \
-      VERIFY_TABLE(OBJTYPE) \
-      UPDATE_RECORD(update_record, INDEX, valuelen); \
-      /* ret is -1 if record created, or else it is the length of the data portion of the originally stored */ \
-      /* structure (it does not include the key portion */ \
-      if (ret == -1) return 0; \
-      int64_t& storage = wasm_interface::get().table_storage; \
-      /* need to calculate the difference between the original rounded byte size and the new rounded byte size */ \
-      storage += round_to_byte_boundary(valuelen) - round_to_byte_boundary(KEY_SIZE + ret); \
-      \
-      EOS_ASSERT(storage <= (wasm_interface::get().per_code_account_max_db_limit_mbytes * bytes_per_mbyte), \
-                 tx_code_db_limit_exceeded, \
-                 "Database limit exceeded for account=${name}",("name", name(wasm_interface::get().current_apply_context->code.value))); \
-      return 1; \
-   } \
-   DEFINE_INTRINSIC_FUNCTION3(env,remove_##OBJTYPE,remove_##OBJTYPE,i32,i64,scope,i64,table,i32,valueptr) { \
-      VERIFY_TABLE(OBJTYPE) \
-      UPDATE_RECORD(remove_record, INDEX, sizeof(typename INDEX::value_type::key_type)*INDEX::value_type::number_of_keys); \
-      /* ret is -1 if record created, or else it is the length of the data portion of the originally stored */ \
-      /* structure (it does not include the key portion */ \
-      if (ret == -1) return 0; \
-      int64_t& storage = wasm_interface::get().table_storage; \
-      storage -= round_to_byte_boundary(KEY_SIZE + ret) + wasm_interface::get().row_overhead_db_limit_bytes; \
-      \
-      EOS_ASSERT(storage <= (wasm_interface::get().per_code_account_max_db_limit_mbytes * bytes_per_mbyte), \
-                 tx_code_db_limit_exceeded, \
-                 "Database limit exceeded for account=${name}",("name", name(wasm_interface::get().current_apply_context->code.value))); \
-      return 1; \
-   }
-
-#define DEFINE_RECORD_READ_FUNCTION(OBJTYPE, ACTION, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_INTRINSIC_FUNCTION5(env,ACTION##_##FUNCPREFIX##OBJTYPE,ACTION##_##FUNCPREFIX##OBJTYPE,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) { \
-      VERIFY_TABLE(OBJTYPE) \
-      READ_RECORD(ACTION##_record, INDEX, SCOPE); \
-   }
-
-#define DEFINE_RECORD_READ_FUNCTIONS(OBJTYPE, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, load, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, front, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, back, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, next, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, previous, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, lower_bound, FUNCPREFIX, INDEX, SCOPE) \
-   DEFINE_RECORD_READ_FUNCTION(OBJTYPE, upper_bound, FUNCPREFIX, INDEX, SCOPE)
-
-DEFINE_RECORD_UPDATE_FUNCTIONS(i64, key_value_index, 8);
-DEFINE_RECORD_READ_FUNCTIONS(i64,,key_value_index, by_scope_primary);
-
-DEFINE_RECORD_UPDATE_FUNCTIONS(i128i128, key128x128_value_index, 32);
-DEFINE_RECORD_READ_FUNCTIONS(i128i128, primary_,   key128x128_value_index, by_scope_primary);
-DEFINE_RECORD_READ_FUNCTIONS(i128i128, secondary_, key128x128_value_index, by_scope_secondary);
-
-DEFINE_RECORD_UPDATE_FUNCTIONS(i64i64i64, key64x64x64_value_index, 24);
-DEFINE_RECORD_READ_FUNCTIONS(i64i64i64, primary_,   key64x64x64_value_index, by_scope_primary);
-DEFINE_RECORD_READ_FUNCTIONS(i64i64i64, secondary_, key64x64x64_value_index, by_scope_secondary);
-DEFINE_RECORD_READ_FUNCTIONS(i64i64i64, tertiary_,  key64x64x64_value_index, by_scope_tertiary);
-
-
-#define UPDATE_RECORD_STR(FUNCTION) \
-  VERIFY_TABLE(str) \
-  auto lambda = [&](apply_context* ctx, std::string* keys, char *data, uint32_t datalen) -> int32_t { \
-    return ctx->FUNCTION<keystr_value_object>( name(scope), name(ctx->code.value), table_name, keys, data, datalen); \
-  }; \
-  const int32_t ret = validate_str<decltype(lambda)>(keyptr, keylen, valueptr, valuelen, lambda);
-
-#define READ_RECORD_STR(FUNCTION) \
-  VERIFY_TABLE(str) \
-  auto lambda = [&](apply_context* ctx, std::string* keys, char *data, uint32_t datalen) -> int32_t { \
-    auto res = ctx->FUNCTION<keystr_value_index, by_scope_primary>( name(scope), name(code), table_name, keys, data, datalen); \
-    return res; \
-  }; \
-  return validate_str<decltype(lambda)>(keyptr, keylen, valueptr, valuelen, lambda);
-
-DEFINE_INTRINSIC_FUNCTION6(env,store_str,store_str,i32,i64,scope,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-   UPDATE_RECORD_STR(store_record)
-   const bool created = (ret == -1);
-   auto& storage = wasm_interface::get().table_storage;
-   if (created)
-   {
-      storage += round_to_byte_boundary(keylen + valuelen) + wasm_interface::get().row_overhead_db_limit_bytes;
-   }
-   else
-      // need to calculate the difference between the original rounded byte size and the new rounded byte size
-      storage += round_to_byte_boundary(keylen + valuelen) - round_to_byte_boundary(keylen + ret);
-
-   EOS_ASSERT(storage <= (wasm_interface::get().per_code_account_max_db_limit_mbytes * bytes_per_mbyte),
-              tx_code_db_limit_exceeded,
-              "Database limit exceeded for account=${name}",("name", name(wasm_interface::get().current_apply_context->code.value)));
-
-   return created ? 1 : 0;
-}
-DEFINE_INTRINSIC_FUNCTION6(env,update_str,update_str,i32,i64,scope,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-   UPDATE_RECORD_STR(update_record)
-   if (ret == -1) return 0;
-   auto& storage = wasm_interface::get().table_storage;
-   // need to calculate the difference between the original rounded byte size and the new rounded byte size
-   storage += round_to_byte_boundary(keylen + valuelen) - round_to_byte_boundary(keylen + ret);
-
-   EOS_ASSERT(storage <= (wasm_interface::get().per_code_account_max_db_limit_mbytes * bytes_per_mbyte),
-              tx_code_db_limit_exceeded,
-              "Database limit exceeded for account=${name}",("name", name(wasm_interface::get().current_apply_context->code.value)));
-   return 1;
-}
-DEFINE_INTRINSIC_FUNCTION4(env,remove_str,remove_str,i32,i64,scope,i64,table,i32,keyptr,i32,keylen) {
-   int32_t valueptr=0, valuelen=0;
-   UPDATE_RECORD_STR(remove_record)
-   if (ret == -1) return 0;
-   auto& storage = wasm_interface::get().table_storage;
-   storage -= round_to_byte_boundary(keylen + ret) + wasm_interface::get().row_overhead_db_limit_bytes;
-
-   EOS_ASSERT(storage <= (wasm_interface::get().per_code_account_max_db_limit_mbytes * bytes_per_mbyte),
-              tx_code_db_limit_exceeded,
-              "Database limit exceeded for account=${name}",("name", name(wasm_interface::get().current_apply_context->code.value)));
-   return 1;
-}
-
-DEFINE_INTRINSIC_FUNCTION7(env,load_str,load_str,i32,i64,scope,i64,code,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-  READ_RECORD_STR(load_record)
-}
-DEFINE_INTRINSIC_FUNCTION5(env,front_str,front_str,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-  int32_t keyptr=0, keylen=0;
-  READ_RECORD_STR(front_record)
-}
-DEFINE_INTRINSIC_FUNCTION5(env,back_str,back_str,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-  int32_t keyptr=0, keylen=0;
-  READ_RECORD_STR(back_record)
-}
-DEFINE_INTRINSIC_FUNCTION7(env,next_str,next_str,i32,i64,scope,i64,code,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-  READ_RECORD_STR(next_record)
-}
-DEFINE_INTRINSIC_FUNCTION7(env,previous_str,previous_str,i32,i64,scope,i64,code,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-  READ_RECORD_STR(previous_record)
-}
-DEFINE_INTRINSIC_FUNCTION7(env,lower_bound_str,lower_bound_str,i32,i64,scope,i64,code,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-  READ_RECORD_STR(lower_bound_record)
-}
-DEFINE_INTRINSIC_FUNCTION7(env,upper_bound_str,upper_bound_str,i32,i64,scope,i64,code,i64,table,i32,keyptr,i32,keylen,i32,valueptr,i32,valuelen) {
-  READ_RECORD_STR(upper_bound_record)
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env, assert_is_utf8,assert_is_utf8,none,i32,dataptr,i32,datalen,i32,msg) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-
-  const char* str = &memoryRef<const char>( mem, dataptr );
-  const bool test = fc::is_utf8(std::string( str, datalen ));
-
-  FC_ASSERT( test, "assertion failed: ${s}", ("s",msg) );
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env, assert_sha256,assert_sha256,none,i32,dataptr,i32,datalen,i32,hash) {
-   FC_ASSERT( datalen > 0 );
-
-   auto& wasm  = wasm_interface::get();
-   auto  mem          = wasm.current_memory;
-
-   char* data = memoryArrayPtr<char>( mem, dataptr, datalen );
-   const auto& v = memoryRef<fc::sha256>( mem, hash );
-
-   auto result = fc::sha256::hash( data, datalen );
-   FC_ASSERT( result == v, "hash miss match" );
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,sha256,sha256,none,i32,dataptr,i32,datalen,i32,hash) {
-   FC_ASSERT( datalen > 0 );
-
-   auto& wasm  = wasm_interface::get();
-   auto  mem          = wasm.current_memory;
-
-   char* data = memoryArrayPtr<char>( mem, dataptr, datalen );
-   auto& v = memoryRef<fc::sha256>( mem, hash );
-   v  = fc::sha256::hash( data, datalen );
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,multeq_i128,multeq_i128,none,i32,self,i32,other) {
-   auto& wasm  = wasm_interface::get();
-   auto  mem   = wasm.current_memory;
-   auto& v = memoryRef<unsigned __int128>( mem, self );
-   const auto& o = memoryRef<const unsigned __int128>( mem, other );
-   v *= o;
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,diveq_i128,diveq_i128,none,i32,self,i32,other) {
-   auto& wasm  = wasm_interface::get();
-   auto  mem          = wasm.current_memory;
-   auto& v = memoryRef<unsigned __int128>( mem, self );
-   const auto& o = memoryRef<const unsigned __int128>( mem, other );
-   FC_ASSERT( o != 0, "divide by zero" );
-   v /= o;
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,double_add,double_add,i64,i64,a,i64,b) {
-   DOUBLE c = DOUBLE(*reinterpret_cast<double *>(&a))
-            + DOUBLE(*reinterpret_cast<double *>(&b));
-   double res = c.convert_to<double>();
-   return *reinterpret_cast<uint64_t *>(&res);
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,double_mult,double_mult,i64,i64,a,i64,b) {
-   DOUBLE c = DOUBLE(*reinterpret_cast<double *>(&a))
-            * DOUBLE(*reinterpret_cast<double *>(&b));
-   double res = c.convert_to<double>();
-   return *reinterpret_cast<uint64_t *>(&res);
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,double_div,double_div,i64,i64,a,i64,b) {
-   auto divisor = DOUBLE(*reinterpret_cast<double *>(&b));
-   FC_ASSERT( divisor != 0, "divide by zero" );
-
-   DOUBLE c = DOUBLE(*reinterpret_cast<double *>(&a)) / divisor;
-   double res = c.convert_to<double>();
-   return *reinterpret_cast<uint64_t *>(&res);
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,double_lt,double_lt,i32,i64,a,i64,b) {
-   return DOUBLE(*reinterpret_cast<double *>(&a))
-        < DOUBLE(*reinterpret_cast<double *>(&b));
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,double_eq,double_eq,i32,i64,a,i64,b) {
-   return DOUBLE(*reinterpret_cast<double *>(&a))
-       == DOUBLE(*reinterpret_cast<double *>(&b));
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,double_gt,double_gt,i32,i64,a,i64,b) {
-   return DOUBLE(*reinterpret_cast<double *>(&a))
-        > DOUBLE(*reinterpret_cast<double *>(&b));
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,double_to_i64,double_to_i64,i64,i64,a) {
-   return DOUBLE(*reinterpret_cast<double *>(&a))
-          .convert_to<uint64_t>();
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,i64_to_double,i64_to_double,i64,i64,a) {
-   double res = DOUBLE(a).convert_to<double>();
-   return *reinterpret_cast<uint64_t *>(&res);
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,get_active_producers,get_active_producers,none,i32,producers,i32,datalen) {
-   auto& wasm    = wasm_interface::get();
-   auto  mem     = wasm.current_memory;
-   types::account_name* dst = memoryArrayPtr<types::account_name>( mem, producers, datalen );
-   return wasm_interface::get().current_validate_context->get_active_producers(dst, datalen);
-}
-
-DEFINE_INTRINSIC_FUNCTION0(env,now,now,i32) {
-   return wasm_interface::get().current_validate_context->controller.head_block_time().sec_since_epoch();
-}
-
-DEFINE_INTRINSIC_FUNCTION0(env,current_code,current_code,i64) {
-   auto& wasm  = wasm_interface::get();
-   return wasm.current_validate_context->code.value;
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,require_auth,require_auth,none,i64,account) {
-   wasm_interface::get().current_validate_context->require_authorization( name(account) );
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,require_notice,require_notice,none,i64,account) {
-   wasm_interface::get().current_apply_context->require_recipient( account );
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,memcpy,memcpy,i32,i32,dstp,i32,srcp,i32,len) {
-   auto& wasm          = wasm_interface::get();
-   auto  mem           = wasm.current_memory;
-   char* dst           = memoryArrayPtr<char>( mem, dstp, len);
-   const char* src     = memoryArrayPtr<const char>( mem, srcp, len );
-   FC_ASSERT( len > 0 );
-
-   if( dst > src )
-      FC_ASSERT( dst >= (src + len), "overlap of memory range is undefined", ("d",dstp)("s",srcp)("l",len) );
-   else
-      FC_ASSERT( src >= (dst + len), "overlap of memory range is undefined", ("d",dstp)("s",srcp)("l",len) );
-
-   memcpy( dst, src, uint32_t(len) );
-   return dstp;
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,memcmp,memcmp,i32,i32,dstp,i32,srcp,i32,len) {
-   auto& wasm          = wasm_interface::get();
-   auto  mem           = wasm.current_memory;
-   char* dst           = memoryArrayPtr<char>( mem, dstp, len);
-   const char* src     = memoryArrayPtr<const char>( mem, srcp, len );
-   FC_ASSERT( len > 0 );
-
-   return memcmp( dst, src, uint32_t(len) );
-}
-
-
-DEFINE_INTRINSIC_FUNCTION3(env,memset,memset,i32,i32,rel_ptr,i32,value,i32,len) {
-   auto& wasm          = wasm_interface::get();
-   auto  mem           = wasm.current_memory;
-   char* ptr           = memoryArrayPtr<char>( mem, rel_ptr, len);
-   FC_ASSERT( len > 0 );
-
-   memset( ptr, value, len );
-   return rel_ptr;
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,sbrk,sbrk,i32,i32,num_bytes) {
-   auto& wasm          = wasm_interface::get();
-
-   FC_ASSERT( num_bytes >= 0, "sbrk can only allocate memory, not reduce" );
-   FC_ASSERT( wasm.current_memory_management != nullptr, "sbrk can only be called during the scope of wasm_interface::vm_call" );
-   U32 previous_bytes_allocated = wasm.current_memory_management->sbrk(num_bytes);
-   checktime(wasm.current_execution_time(), wasm_interface::get().checktime_limit);
-   return previous_bytes_allocated;
-}
-
-
-/**
- * transaction C API implementation
- * @{
- */
-
-DEFINE_INTRINSIC_FUNCTION0(env,transaction_create,transaction_create,i32) {
-   auto& ptrx = wasm_interface::get().current_apply_context->create_pending_transaction();
-   return ptrx.handle;
-}
-
-static void emplace_scope(const name& scope, std::vector<name>& scopes) {
-   auto i = std::upper_bound( scopes.begin(), scopes.end(), scope);
-   if (i == scopes.begin() || *(i - 1) != scope ) {
-     scopes.insert(i, scope);
-   }
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,transaction_require_scope,transaction_require_scope,none,i32,handle,i64,scope,i32,readOnly) {
-   auto& ptrx = wasm_interface::get().current_apply_context->get_pending_transaction(handle);
-   if(readOnly == 0) {
-      emplace_scope(scope, ptrx.scope);
-   } else {
-      emplace_scope(scope, ptrx.read_scope);
-   }
-
-   ptrx.check_size();
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,transaction_add_message,transaction_add_message,none,i32,handle,i32,msg_handle) {
-   auto apply_context  = wasm_interface::get().current_apply_context;
-   auto& ptrx = apply_context->get_pending_transaction(handle);
-   auto& pmsg = apply_context->get_pending_message(msg_handle);
-   ptrx.messages.emplace_back(pmsg);
-   ptrx.check_size();
-   apply_context->release_pending_message(msg_handle);
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,transaction_send,transaction_send,none,i32,handle) {
-   auto apply_context  = wasm_interface::get().current_apply_context;
-   auto& ptrx = apply_context->get_pending_transaction(handle);
-
-   EOS_ASSERT(ptrx.messages.size() > 0, tx_unknown_argument,
-      "Attempting to send a transaction with no messages");
-
-   EOS_ASSERT(false, api_not_supported,
-      "transaction_send is unsupported in this release");
-
-   apply_context->deferred_transactions.emplace_back(ptrx);
-   apply_context->release_pending_transaction(handle);
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,transaction_drop,transaction_drop,none,i32,handle) {
-   wasm_interface::get().current_apply_context->release_pending_transaction(handle);
-}
-
-DEFINE_INTRINSIC_FUNCTION4(env,message_create,message_create,i32,i64,code,i64,type,i32,data,i32,length) {
-   auto& wasm  = wasm_interface::get();
-   auto  mem   = wasm.current_memory;
-
-   EOS_ASSERT( length >= 0, tx_unknown_argument,
-      "Pushing a message with a negative length" );
-
-   bytes payload;
-   if (length > 0) {
-      try {
-         // memoryArrayPtr checks that the entire array of bytes is valid and
-         // within the bounds of the memory segment so that transactions cannot pass
-         // bad values in attempts to read improper memory
-         const char* buffer = memoryArrayPtr<const char>( mem, uint32_t(data), uint32_t(length) );
-         payload.insert(payload.end(), buffer, buffer + length);
-      } catch( const Runtime::Exception& e ) {
-         FC_THROW_EXCEPTION(tx_unknown_argument, "Message data is not a valid memory range");
-      }
-   }
-
-   auto& pmsg = wasm.current_apply_context->create_pending_message(name(code), name(type), payload);
-   return pmsg.handle;
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,message_require_permission,message_require_permission,none,i32,handle,i64,account,i64,permission) {
-   auto apply_context  = wasm_interface::get().current_apply_context;
-   // if this is not sent from the code account with the permission of "code" then we must
-   // presently have the permission to add it, otherwise its a failure
-   if (!(account == apply_context->code.value && name(permission) == name("code"))) {
-      apply_context->require_authorization(name(account), name(permission));
-   }
-   auto& pmsg = apply_context->get_pending_message(handle);
-   pmsg.authorization.emplace_back(name(account), name(permission));
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,message_send,message_send,none,i32,handle) {
-   auto apply_context  = wasm_interface::get().current_apply_context;
-   auto& pmsg = apply_context->get_pending_message(handle);
-
-   apply_context->inline_messages.emplace_back(pmsg);
-   apply_context->release_pending_message(handle);
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,message_drop,message_drop,none,i32,handle) {
-   wasm_interface::get().current_apply_context->release_pending_message(handle);
-}
-
-/**
- * @} transaction C API implementation
- */
-
-
-
-DEFINE_INTRINSIC_FUNCTION2(env,read_message,read_message,i32,i32,destptr,i32,destsize) {
-   FC_ASSERT( destsize > 0 );
-
-   wasm_interface& wasm = wasm_interface::get();
-   auto  mem   = wasm.current_memory;
-   char* begin = memoryArrayPtr<char>( mem, destptr, uint32_t(destsize) );
-
-   int minlen = std::min<int>(wasm.current_validate_context->msg.data.size(), destsize);
-
-//   wdump((destsize)(wasm.current_validate_context->msg.data.size()));
-   memcpy( begin, wasm.current_validate_context->msg.data.data(), minlen );
-   return minlen;
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,assert,assert,none,i32,test,i32,msg) {
-   const char* m = &Runtime::memoryRef<char>( wasm_interface::get().current_memory, msg );
-  std::string message( m );
-  if( !test ) edump((message));
-  FC_ASSERT( test, "assertion failed: ${s}", ("s",message)("ptr",msg) );
-}
-
-DEFINE_INTRINSIC_FUNCTION0(env,message_size,message_size,i32) {
-   return wasm_interface::get().current_validate_context->msg.data.size();
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,malloc,malloc,i32,i32,size) {
-   FC_ASSERT( size > 0 );
-   int32_t& end = Runtime::memoryRef<int32_t>( Runtime::getDefaultMemory(wasm_interface::get().current_module), 0);
-   int32_t old_end = end;
-   end += 8*((size+7)/8);
-   FC_ASSERT( end > old_end );
-   return old_end;
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,printi,printi,none,i64,val) {
-  std::cerr << uint64_t(val);
-}
-DEFINE_INTRINSIC_FUNCTION1(env,printd,printd,none,i64,val) {
-  std::cerr << DOUBLE(*reinterpret_cast<double *>(&val));
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,printi128,printi128,none,i32,val) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-  auto& value = memoryRef<unsigned __int128>( mem, val );
-  fc::uint128_t v(value>>64, uint64_t(value) );
-  std::cerr << fc::variant(v).get_string();
-}
-DEFINE_INTRINSIC_FUNCTION1(env,printn,printn,none,i64,val) {
-  std::cerr << name(val).to_string();
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,prints,prints,none,i32,charptr) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-
-  const char* str = &memoryRef<const char>( mem, charptr );
-
-  std::cerr << std::string( str, strnlen(str, wasm.current_state->mem_end-charptr) );
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,prints_l,prints_l,none,i32,charptr,i32,len) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-
-  const char* str = &memoryRef<const char>( mem, charptr );
-
-  std::cerr << std::string( str, len );
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,printhex,printhex,none,i32,data,i32,datalen) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-
-  char* buff = memoryArrayPtr<char>(mem, data, datalen);
-  std::cerr << fc::to_hex(buff, datalen);
-}
-
-
-DEFINE_INTRINSIC_FUNCTION1(env,free,free,none,i32,ptr) {
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,account_balance_get,account_balance_get,i32,i32,charptr,i32,len) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-
-  const uint32_t account_balance_size = sizeof(account_balance);
-  FC_ASSERT( len == account_balance_size, "passed in len ${len} is not equal to the size of an account_balance struct == ${real_len}", ("len",len)("real_len",account_balance_size) );
-
-  account_balance& total_balance = memoryRef<account_balance>( mem, charptr );
-
-  wasm.current_apply_context->require_scope(total_balance.account);
-
-  auto& db = wasm.current_apply_context->db;
-  auto* balance        = db.find< balance_object,by_owner_name >( total_balance.account );
-  auto* staked_balance = db.find<staked_balance_object,by_owner_name>( total_balance.account );
-
-  if (balance == nullptr || staked_balance == nullptr)
-     return false;
-
-  total_balance.eos_balance          = asset(balance->balance, EOS_SYMBOL);
-  total_balance.staked_balance       = asset(staked_balance->staked_balance);
-  total_balance.unstaking_balance    = asset(staked_balance->unstaking_balance);
-  total_balance.last_unstaking_time  = staked_balance->last_unstaking_time;
-
-  return true;
-}
-
-   wasm_interface& wasm_interface::get() {
-      static wasm_interface*  wasm = nullptr;
-      if( !wasm )
+class context_aware_api {
+   public:
+      context_aware_api(apply_context& ctx, bool context_free = false )
+      :context(ctx)
       {
-         wlog( "Runtime::init" );
-         Runtime::init();
-         wasm = new wasm_interface();
+         if( context.context_free )
+            FC_ASSERT( context_free, "only context free api's can be used in this context" );
+         context.used_context_free_api |= !context_free;
       }
-      return *wasm;
-   }
 
+      void checktime() {
+         context.trx_context.checktime();
+      }
 
+   protected:
+      apply_context&             context;
 
-   struct RootResolver : Runtime::Resolver
-   {
-      std::map<std::string,Resolver*> moduleNameToResolverMap;
+};
 
-     bool resolve(const std::string& moduleName,const std::string& exportName,ObjectType type,ObjectInstance*& outObject) override
-     {
-         // Try to resolve an intrinsic first.
-         if(IntrinsicResolver::singleton.resolve(moduleName,exportName,type,outObject)) { return true; }
-         FC_ASSERT( !"unresolvable", "${module}.${export}", ("module",moduleName)("export",exportName) );
+class context_free_api : public context_aware_api {
+   public:
+      context_free_api( apply_context& ctx )
+      :context_aware_api(ctx, true) {
+         /* the context_free_data is not available during normal application because it is prunable */
+         FC_ASSERT( context.context_free, "this API may only be called from context_free apply" );
+      }
+
+      int get_context_free_data( uint32_t index, array_ptr<char> buffer, size_t buffer_size )const {
+         return context.get_context_free_data( index, buffer, buffer_size );
+      }
+};
+
+class privileged_api : public context_aware_api {
+   public:
+      privileged_api( apply_context& ctx )
+      :context_aware_api(ctx)
+      {
+         FC_ASSERT( context.privileged, "${code} does not have permission to call this API", ("code",context.receiver) );
+      }
+
+      /**
+       * This should return true if a feature is active and irreversible, false if not.
+       *
+       * Irreversiblity by fork-database is not consensus safe, therefore, this defines
+       * irreversiblity only by block headers not by BFT short-cut.
+       */
+      int is_feature_active( int64_t feature_name ) {
          return false;
-     }
-   };
+      }
 
-   int64_t wasm_interface::current_execution_time()
-   {
-      return (fc::time_point::now() - checktimeStart).count();
+      /**
+       *  This should schedule the feature to be activated once the
+       *  block that includes this call is irreversible. It should
+       *  fail if the feature is already pending.
+       *
+       *  Feature name should be base32 encoded name.
+       */
+      void activate_feature( int64_t feature_name ) {
+         FC_ASSERT( !"Unsupported Hardfork Detected" );
+      }
+
+      /**
+       * update the resource limits associated with an account.  Note these new values will not take effect until the
+       * next resource "tick" which is currently defined as a cycle boundary inside a block.
+       *
+       * @param account - the account whose limits are being modified
+       * @param ram_bytes - the limit for ram bytes
+       * @param net_weight - the weight for determining share of network capacity
+       * @param cpu_weight - the weight for determining share of compute capacity
+       */
+      void set_resource_limits( account_name account, int64_t ram_bytes, int64_t net_weight, int64_t cpu_weight) {
+         EOS_ASSERT(ram_bytes >= -1, wasm_execution_error, "invalid value for ram resource limit expected [-1,INT64_MAX]");
+         EOS_ASSERT(net_weight >= -1, wasm_execution_error, "invalid value for net resource weight expected [-1,INT64_MAX]");
+         EOS_ASSERT(cpu_weight >= -1, wasm_execution_error, "invalid value for cpu resource weight expected [-1,INT64_MAX]");
+         if( context.control.get_mutable_resource_limits_manager().set_account_limits(account, ram_bytes, net_weight, cpu_weight) ) {
+            context.trx_context.validate_ram_usage.insert( account );
+         }
+      }
+
+      void get_resource_limits( account_name account, int64_t& ram_bytes, int64_t& net_weight, int64_t& cpu_weight ) {
+         context.control.get_resource_limits_manager().get_account_limits( account, ram_bytes, net_weight, cpu_weight);
+      }
+
+      int64_t set_proposed_producers( array_ptr<char> packed_producer_schedule, size_t datalen) {
+         datastream<const char*> ds( packed_producer_schedule, datalen );
+         vector<producer_key> producers;
+         fc::raw::unpack(ds, producers);
+         EOS_ASSERT(producers.size() <= config::max_producers, wasm_execution_error, "Producer schedule exceeds the maximum producer count for this chain");
+         // check that producers are unique
+         std::set<account_name> unique_producers;
+         for (const auto& p: producers) {
+            EOS_ASSERT( context.is_account(p.producer_name), wasm_execution_error, "producer schedule includes a nonexisting account" );
+            EOS_ASSERT( p.block_signing_key.valid(), wasm_execution_error, "producer schedule includes an invalid key" );
+            unique_producers.insert(p.producer_name);
+         }
+         EOS_ASSERT( producers.size() == unique_producers.size(), wasm_execution_error, "duplicate producer name in producer schedule" );
+         return context.control.set_proposed_producers( std::move(producers) );
+      }
+
+      uint32_t get_blockchain_parameters_packed( array_ptr<char> packed_blockchain_parameters, size_t buffer_size) {
+         auto& gpo = context.control.get_global_properties();
+
+         auto s = fc::raw::pack_size( gpo.configuration );
+         if( buffer_size == 0 ) return s;
+
+         if ( s <= buffer_size ) {
+            datastream<char*> ds( packed_blockchain_parameters, s );
+            fc::raw::pack(ds, gpo.configuration);
+            return s;
+         }
+         return 0;
+      }
+
+      void set_blockchain_parameters_packed( array_ptr<char> packed_blockchain_parameters, size_t datalen) {
+         datastream<const char*> ds( packed_blockchain_parameters, datalen );
+         chain::chain_config cfg;
+         fc::raw::unpack(ds, cfg);
+         cfg.validate();
+         context.db.modify( context.control.get_global_properties(),
+            [&]( auto& gprops ) {
+                 gprops.configuration = cfg;
+         });
+      }
+
+      bool is_privileged( account_name n )const {
+         return context.db.get<account_object, by_name>( n ).privileged;
+      }
+
+      void set_privileged( account_name n, bool is_priv ) {
+         const auto& a = context.db.get<account_object, by_name>( n );
+         context.db.modify( a, [&]( auto& ma ){
+            ma.privileged = is_priv;
+         });
+      }
+
+};
+
+class softfloat_api : public context_aware_api {
+   public:
+      // TODO add traps on truncations for special cases (NaN or outside the range which rounds to an integer)
+      softfloat_api( apply_context& ctx )
+      :context_aware_api(ctx, true) {}
+
+      // float binops
+      float _eosio_f32_add( float a, float b ) {
+         float32_t ret = f32_add( to_softfloat32(a), to_softfloat32(b) );
+         return *reinterpret_cast<float*>(&ret);
+      }
+      float _eosio_f32_sub( float a, float b ) {
+         float32_t ret = f32_sub( to_softfloat32(a), to_softfloat32(b) );
+         return *reinterpret_cast<float*>(&ret);
+      }
+      float _eosio_f32_div( float a, float b ) {
+         float32_t ret = f32_div( to_softfloat32(a), to_softfloat32(b) );
+         return *reinterpret_cast<float*>(&ret);
+      }
+      float _eosio_f32_mul( float a, float b ) {
+         float32_t ret = f32_mul( to_softfloat32(a), to_softfloat32(b) );
+         return *reinterpret_cast<float*>(&ret);
+      }
+      float _eosio_f32_min( float af, float bf ) {
+         float32_t a = to_softfloat32(af);
+         float32_t b = to_softfloat32(bf);
+         if (is_nan(a)) {
+            return af;
+         }
+         if (is_nan(b)) {
+            return bf;
+         }
+         if ( sign_bit(a) != sign_bit(b) ) {
+            return sign_bit(a) ? af : bf;
+         }
+         return f32_lt(a,b) ? af : bf;
+      }
+      float _eosio_f32_max( float af, float bf ) {
+         float32_t a = to_softfloat32(af);
+         float32_t b = to_softfloat32(bf);
+         if (is_nan(a)) {
+            return af;
+         }
+         if (is_nan(b)) {
+            return bf;
+         }
+         if ( sign_bit(a) != sign_bit(b) ) {
+            return sign_bit(a) ? bf : af;
+         }
+         return f32_lt( a, b ) ? bf : af;
+      }
+      float _eosio_f32_copysign( float af, float bf ) {
+         float32_t a = to_softfloat32(af);
+         float32_t b = to_softfloat32(bf);
+         uint32_t sign_of_a = a.v >> 31;
+         uint32_t sign_of_b = b.v >> 31;
+         a.v &= ~(1 << 31);             // clear the sign bit
+         a.v = a.v | (sign_of_b << 31); // add the sign of b
+         return from_softfloat32(a);
+      }
+      // float unops
+      float _eosio_f32_abs( float af ) {
+         float32_t a = to_softfloat32(af);
+         a.v &= ~(1 << 31);
+         return from_softfloat32(a);
+      }
+      float _eosio_f32_neg( float af ) {
+         float32_t a = to_softfloat32(af);
+         uint32_t sign = a.v >> 31;
+         a.v &= ~(1 << 31);
+         a.v |= (!sign << 31);
+         return from_softfloat32(a);
+      }
+      float _eosio_f32_sqrt( float a ) {
+         float32_t ret = f32_sqrt( to_softfloat32(a) );
+         return from_softfloat32(ret);
+      }
+      // ceil, floor, trunc and nearest are lifted from libc
+      float _eosio_f32_ceil( float af ) {
+         float32_t a = to_softfloat32(af);
+         int e = (int)(a.v >> 23 & 0xFF) - 0X7F;
+         uint32_t m;
+         if (e >= 23)
+            return af;
+         if (e >= 0) {
+            m = 0x007FFFFF >> e;
+            if ((a.v & m) == 0)
+               return af;
+            if (a.v >> 31 == 0)
+               a.v += m;
+            a.v &= ~m;
+         } else {
+            if (a.v >> 31)
+               a.v = 0x80000000; // return -0.0f
+            else if (a.v << 1)
+               a.v = 0x3F800000; // return 1.0f
+         }
+
+         return from_softfloat32(a);
+      }
+      float _eosio_f32_floor( float af ) {
+         float32_t a = to_softfloat32(af);
+         int e = (int)(a.v >> 23 & 0xFF) - 0X7F;
+         uint32_t m;
+         if (e >= 23)
+            return af;
+         if (e >= 0) {
+            m = 0x007FFFFF >> e;
+            if ((a.v & m) == 0)
+               return af;
+            if (a.v >> 31)
+               a.v += m;
+            a.v &= ~m;
+         } else {
+            if (a.v >> 31 == 0)
+               a.v = 0;
+            else if (a.v << 1)
+               a.v = 0xBF800000; // return -1.0f
+         }
+         return from_softfloat32(a);
+      }
+      float _eosio_f32_trunc( float af ) {
+         float32_t a = to_softfloat32(af);
+         int e = (int)(a.v >> 23 & 0xff) - 0x7f + 9;
+         uint32_t m;
+         if (e >= 23 + 9)
+            return af;
+         if (e < 9)
+            e = 1;
+         m = -1U >> e;
+         if ((a.v & m) == 0)
+            return af;
+         a.v &= ~m;
+         return from_softfloat32(a);
+      }
+      float _eosio_f32_nearest( float af ) {
+         float32_t a = to_softfloat32(af);
+         int e = a.v>>23 & 0xff;
+         int s = a.v>>31;
+         float32_t y;
+         if (e >= 0x7f+23)
+            return af;
+         if (s)
+            y = f32_add( f32_sub( a, float32_t{inv_float_eps} ), float32_t{inv_float_eps} );
+         else
+            y = f32_sub( f32_add( a, float32_t{inv_float_eps} ), float32_t{inv_float_eps} );
+         if (f32_eq( y, {0} ) )
+            return s ? -0.0f : 0.0f;
+         return from_softfloat32(y);
+      }
+
+      // float relops
+      bool _eosio_f32_eq( float a, float b ) {  return f32_eq( to_softfloat32(a), to_softfloat32(b) ); }
+      bool _eosio_f32_ne( float a, float b ) { return !f32_eq( to_softfloat32(a), to_softfloat32(b) ); }
+      bool _eosio_f32_lt( float a, float b ) { return f32_lt( to_softfloat32(a), to_softfloat32(b) ); }
+      bool _eosio_f32_le( float a, float b ) { return f32_le( to_softfloat32(a), to_softfloat32(b) ); }
+      bool _eosio_f32_gt( float af, float bf ) {
+         float32_t a = to_softfloat32(af);
+         float32_t b = to_softfloat32(bf);
+         if (is_nan(a))
+            return false;
+         if (is_nan(b))
+            return false;
+         return !f32_le( a, b );
+      }
+      bool _eosio_f32_ge( float af, float bf ) {
+         float32_t a = to_softfloat32(af);
+         float32_t b = to_softfloat32(bf);
+         if (is_nan(a))
+            return false;
+         if (is_nan(b))
+            return false;
+         return !f32_lt( a, b );
+      }
+
+      // double binops
+      double _eosio_f64_add( double a, double b ) {
+         float64_t ret = f64_add( to_softfloat64(a), to_softfloat64(b) );
+         return from_softfloat64(ret);
+      }
+      double _eosio_f64_sub( double a, double b ) {
+         float64_t ret = f64_sub( to_softfloat64(a), to_softfloat64(b) );
+         return from_softfloat64(ret);
+      }
+      double _eosio_f64_div( double a, double b ) {
+         float64_t ret = f64_div( to_softfloat64(a), to_softfloat64(b) );
+         return from_softfloat64(ret);
+      }
+      double _eosio_f64_mul( double a, double b ) {
+         float64_t ret = f64_mul( to_softfloat64(a), to_softfloat64(b) );
+         return from_softfloat64(ret);
+      }
+      double _eosio_f64_min( double af, double bf ) {
+         float64_t a = to_softfloat64(af);
+         float64_t b = to_softfloat64(bf);
+         if (is_nan(a))
+            return af;
+         if (is_nan(b))
+            return bf;
+         if (sign_bit(a) != sign_bit(b))
+            return sign_bit(a) ? af : bf;
+         return f64_lt( a, b ) ? af : bf;
+      }
+      double _eosio_f64_max( double af, double bf ) {
+         float64_t a = to_softfloat64(af);
+         float64_t b = to_softfloat64(bf);
+         if (is_nan(a))
+            return af;
+         if (is_nan(b))
+            return bf;
+         if (sign_bit(a) != sign_bit(b))
+            return sign_bit(a) ? bf : af;
+         return f64_lt( a, b ) ? bf : af;
+      }
+      double _eosio_f64_copysign( double af, double bf ) {
+         float64_t a = to_softfloat64(af);
+         float64_t b = to_softfloat64(bf);
+         uint64_t sign_of_a = a.v >> 63;
+         uint64_t sign_of_b = b.v >> 63;
+         a.v &= ~(uint64_t(1) << 63);             // clear the sign bit
+         a.v = a.v | (sign_of_b << 63); // add the sign of b
+         return from_softfloat64(a);
+      }
+
+      // double unops
+      double _eosio_f64_abs( double af ) {
+         float64_t a = to_softfloat64(af);
+         a.v &= ~(uint64_t(1) << 63);
+         return from_softfloat64(a);
+      }
+      double _eosio_f64_neg( double af ) {
+         float64_t a = to_softfloat64(af);
+         uint64_t sign = a.v >> 63;
+         a.v &= ~(uint64_t(1) << 63);
+         a.v |= (uint64_t(!sign) << 63);
+         return from_softfloat64(a);
+      }
+      double _eosio_f64_sqrt( double a ) {
+         float64_t ret = f64_sqrt( to_softfloat64(a) );
+         return from_softfloat64(ret);
+      }
+      // ceil, floor, trunc and nearest are lifted from libc
+      double _eosio_f64_ceil( double af ) {
+         float64_t a = to_softfloat64( af );
+         float64_t ret;
+         int e = a.v >> 52 & 0x7ff;
+         float64_t y;
+         if (e >= 0x3ff+52 || f64_eq( a, { 0 } ))
+            return af;
+         /* y = int(x) - x, where int(x) is an integer neighbor of x */
+         if (a.v >> 63)
+            y = f64_sub( f64_add( f64_sub( a, float64_t{inv_double_eps} ), float64_t{inv_double_eps} ), a );
+         else
+            y = f64_sub( f64_sub( f64_add( a, float64_t{inv_double_eps} ), float64_t{inv_double_eps} ), a );
+         /* special case because of non-nearest rounding modes */
+         if (e <= 0x3ff-1) {
+            return a.v >> 63 ? -0.0 : 1.0; //float64_t{0x8000000000000000} : float64_t{0xBE99999A3F800000}; //either -0.0 or 1
+         }
+         if (f64_lt( y, to_softfloat64(0) )) {
+            ret = f64_add( f64_add( a, y ), to_softfloat64(1) ); // 0xBE99999A3F800000 } ); // plus 1
+            return from_softfloat64(ret);
+         }
+         ret = f64_add( a, y );
+         return from_softfloat64(ret);
+      }
+      double _eosio_f64_floor( double af ) {
+         float64_t a = to_softfloat64( af );
+         float64_t ret;
+         int e = a.v >> 52 & 0x7FF;
+         float64_t y;
+         double de = 1/DBL_EPSILON;
+         if ( a.v == 0x8000000000000000) {
+            return af;
+         }
+         if (e >= 0x3FF+52 || a.v == 0) {
+            return af;
+         }
+         if (a.v >> 63)
+            y = f64_sub( f64_add( f64_sub( a, float64_t{inv_double_eps} ), float64_t{inv_double_eps} ), a );
+         else
+            y = f64_sub( f64_sub( f64_add( a, float64_t{inv_double_eps} ), float64_t{inv_double_eps} ), a );
+         if (e <= 0x3FF-1) {
+            return a.v>>63 ? -1.0 : 0.0; //float64_t{0xBFF0000000000000} : float64_t{0}; // -1 or 0
+         }
+         if ( !f64_le( y, float64_t{0} ) ) {
+            ret = f64_sub( f64_add(a,y), to_softfloat64(1.0));
+            return from_softfloat64(ret);
+         }
+         ret = f64_add( a, y );
+         return from_softfloat64(ret);
+      }
+      double _eosio_f64_trunc( double af ) {
+         float64_t a = to_softfloat64( af );
+         int e = (int)(a.v >> 52 & 0x7ff) - 0x3ff + 12;
+         uint64_t m;
+         if (e >= 52 + 12)
+            return af;
+         if (e < 12)
+            e = 1;
+         m = -1ULL >> e;
+         if ((a.v & m) == 0)
+            return af;
+         a.v &= ~m;
+         return from_softfloat64(a);
+      }
+
+      double _eosio_f64_nearest( double af ) {
+         float64_t a = to_softfloat64( af );
+         int e = (a.v >> 52 & 0x7FF);
+         int s = a.v >> 63;
+         float64_t y;
+         if ( e >= 0x3FF+52 )
+            return af;
+         if ( s )
+            y = f64_add( f64_sub( a, float64_t{inv_double_eps} ), float64_t{inv_double_eps} );
+         else
+            y = f64_sub( f64_add( a, float64_t{inv_double_eps} ), float64_t{inv_double_eps} );
+         if ( f64_eq( y, float64_t{0} ) )
+            return s ? -0.0 : 0.0;
+         return from_softfloat64(y);
+      }
+
+      // double relops
+      bool _eosio_f64_eq( double a, double b ) { return f64_eq( to_softfloat64(a), to_softfloat64(b) ); }
+      bool _eosio_f64_ne( double a, double b ) { return !f64_eq( to_softfloat64(a), to_softfloat64(b) ); }
+      bool _eosio_f64_lt( double a, double b ) { return f64_lt( to_softfloat64(a), to_softfloat64(b) ); }
+      bool _eosio_f64_le( double a, double b ) { return f64_le( to_softfloat64(a), to_softfloat64(b) ); }
+      bool _eosio_f64_gt( double af, double bf ) {
+         float64_t a = to_softfloat64(af);
+         float64_t b = to_softfloat64(bf);
+         if (is_nan(a))
+            return false;
+         if (is_nan(b))
+            return false;
+         return !f64_le( a, b );
+      }
+      bool _eosio_f64_ge( double af, double bf ) {
+         float64_t a = to_softfloat64(af);
+         float64_t b = to_softfloat64(bf);
+         if (is_nan(a))
+            return false;
+         if (is_nan(b))
+            return false;
+         return !f64_lt( a, b );
+      }
+
+      // float and double conversions
+      double _eosio_f32_promote( float a ) {
+         return from_softfloat64(f32_to_f64( to_softfloat32(a)) );
+      }
+      float _eosio_f64_demote( double a ) {
+         return from_softfloat32(f64_to_f32( to_softfloat64(a)) );
+      }
+      int32_t _eosio_f32_trunc_i32s( float af ) {
+         float32_t a = to_softfloat32(af);
+         if (_eosio_f32_ge(af, 2147483648.0f) || _eosio_f32_lt(af, -2147483648.0f))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_s/i32 overflow" );
+
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_s/i32 unrepresentable");
+         return f32_to_i32( to_softfloat32(_eosio_f32_trunc( af )), 0, false );
+      }
+      int32_t _eosio_f64_trunc_i32s( double af ) {
+         float64_t a = to_softfloat64(af);
+         if (_eosio_f64_ge(af, 2147483648.0) || _eosio_f64_lt(af, -2147483648.0))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_s/i32 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_s/i32 unrepresentable");
+         return f64_to_i32( to_softfloat64(_eosio_f64_trunc( af )), 0, false );
+      }
+      uint32_t _eosio_f32_trunc_i32u( float af ) {
+         float32_t a = to_softfloat32(af);
+         if (_eosio_f32_ge(af, 4294967296.0f) || _eosio_f32_le(af, -1.0f))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_u/i32 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_u/i32 unrepresentable");
+         return f32_to_ui32( to_softfloat32(_eosio_f32_trunc( af )), 0, false );
+      }
+      uint32_t _eosio_f64_trunc_i32u( double af ) {
+         float64_t a = to_softfloat64(af);
+         if (_eosio_f64_ge(af, 4294967296.0) || _eosio_f64_le(af, -1.0))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_u/i32 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_u/i32 unrepresentable");
+         return f64_to_ui32( to_softfloat64(_eosio_f64_trunc( af )), 0, false );
+      }
+      int64_t _eosio_f32_trunc_i64s( float af ) {
+         float32_t a = to_softfloat32(af);
+         if (_eosio_f32_ge(af, 9223372036854775808.0f) || _eosio_f32_lt(af, -9223372036854775808.0f))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_s/i64 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_s/i64 unrepresentable");
+         return f32_to_i64( to_softfloat32(_eosio_f32_trunc( af )), 0, false );
+      }
+      int64_t _eosio_f64_trunc_i64s( double af ) {
+         float64_t a = to_softfloat64(af);
+         if (_eosio_f64_ge(af, 9223372036854775808.0) || _eosio_f64_lt(af, -9223372036854775808.0))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_s/i64 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_s/i64 unrepresentable");
+
+         return f64_to_i64( to_softfloat64(_eosio_f64_trunc( af )), 0, false );
+      }
+      uint64_t _eosio_f32_trunc_i64u( float af ) {
+         float32_t a = to_softfloat32(af);
+         if (_eosio_f32_ge(af, 18446744073709551616.0f) || _eosio_f32_le(af, -1.0f))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_u/i64 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f32.convert_u/i64 unrepresentable");
+         return f32_to_ui64( to_softfloat32(_eosio_f32_trunc( af )), 0, false );
+      }
+      uint64_t _eosio_f64_trunc_i64u( double af ) {
+         float64_t a = to_softfloat64(af);
+         if (_eosio_f64_ge(af, 18446744073709551616.0) || _eosio_f64_le(af, -1.0))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_u/i64 overflow");
+         if (is_nan(a))
+            FC_THROW_EXCEPTION( eosio::chain::wasm_execution_error, "Error, f64.convert_u/i64 unrepresentable");
+         return f64_to_ui64( to_softfloat64(_eosio_f64_trunc( af )), 0, false );
+      }
+      float _eosio_i32_to_f32( int32_t a )  {
+         return from_softfloat32(i32_to_f32( a ));
+      }
+      float _eosio_i64_to_f32( int64_t a ) {
+         return from_softfloat32(i64_to_f32( a ));
+      }
+      float _eosio_ui32_to_f32( uint32_t a ) {
+         return from_softfloat32(ui32_to_f32( a ));
+      }
+      float _eosio_ui64_to_f32( uint64_t a ) {
+         return from_softfloat32(ui64_to_f32( a ));
+      }
+      double _eosio_i32_to_f64( int32_t a ) {
+         return from_softfloat64(i32_to_f64( a ));
+      }
+      double _eosio_i64_to_f64( int64_t a ) {
+         return from_softfloat64(i64_to_f64( a ));
+      }
+      double _eosio_ui32_to_f64( uint32_t a ) {
+         return from_softfloat64(ui32_to_f64( a ));
+      }
+      double _eosio_ui64_to_f64( uint64_t a ) {
+         return from_softfloat64(ui64_to_f64( a ));
+      }
+
+      static bool is_nan( const float32_t f ) {
+         return ((f.v & 0x7FFFFFFF) > 0x7F800000);
+      }
+      static bool is_nan( const float64_t f ) {
+         return ((f.v & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000);
+      }
+      static bool is_nan( const float128_t& f ) {
+         return (((~(f.v[1]) & uint64_t( 0x7FFF000000000000 )) == 0) && (f.v[0] || ((f.v[1]) & uint64_t( 0x0000FFFFFFFFFFFF ))));
+      }
+      static float32_t to_softfloat32( float f ) {
+         return *reinterpret_cast<float32_t*>(&f);
+      }
+      static float64_t to_softfloat64( double d ) {
+         return *reinterpret_cast<float64_t*>(&d);
+      }
+      static float from_softfloat32( float32_t f ) {
+         return *reinterpret_cast<float*>(&f);
+      }
+      static double from_softfloat64( float64_t d ) {
+         return *reinterpret_cast<double*>(&d);
+      }
+      static constexpr uint32_t inv_float_eps = 0x4B000000;
+      static constexpr uint64_t inv_double_eps = 0x4330000000000000;
+
+      static bool sign_bit( float32_t f ) { return f.v >> 31; }
+      static bool sign_bit( float64_t f ) { return f.v >> 63; }
+
+};
+
+class producer_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      int get_active_producers(array_ptr<chain::account_name> producers, size_t buffer_size) {
+         auto active_producers = context.get_active_producers();
+
+         size_t len = active_producers.size();
+         auto s = len * sizeof(chain::account_name);
+         if( buffer_size == 0 ) return s;
+
+         auto copy_size = std::min( buffer_size, s );
+         memcpy( producers, active_producers.data(), copy_size );
+
+         return copy_size;
+      }
+};
+
+class crypto_api : public context_aware_api {
+   public:
+      explicit crypto_api( apply_context& ctx )
+      :context_aware_api(ctx,true){}
+      /**
+       * This method can be optimized out during replay as it has
+       * no possible side effects other than "passing".
+       */
+      void assert_recover_key( const fc::sha256& digest,
+                        array_ptr<char> sig, size_t siglen,
+                        array_ptr<char> pub, size_t publen ) {
+         fc::crypto::signature s;
+         fc::crypto::public_key p;
+         datastream<const char*> ds( sig, siglen );
+         datastream<const char*> pubds( pub, publen );
+
+         fc::raw::unpack(ds, s);
+         fc::raw::unpack(pubds, p);
+
+         auto check = fc::crypto::public_key( s, digest, false );
+         FC_ASSERT( check == p, "Error expected key different than recovered key" );
+      }
+
+      int recover_key( const fc::sha256& digest,
+                        array_ptr<char> sig, size_t siglen,
+                        array_ptr<char> pub, size_t publen ) {
+         fc::crypto::signature s;
+         datastream<const char*> ds( sig, siglen );
+         datastream<char*> pubds( pub, publen );
+
+         fc::raw::unpack(ds, s);
+         fc::raw::pack( pubds, fc::crypto::public_key( s, digest, false ) );
+         return pubds.tellp();
+      }
+
+      template<class Encoder> auto encode(char* data, size_t datalen) {
+         Encoder e;
+         const size_t bs = eosio::chain::config::hashing_checktime_block_size;
+         while ( datalen > bs ) {
+            e.write( data, bs );
+            data += bs;
+            datalen -= bs;
+            context.trx_context.checktime();
+         }
+         e.write( data, datalen );
+         return e.result();
+      }
+
+      void assert_sha256(array_ptr<char> data, size_t datalen, const fc::sha256& hash_val) {
+         auto result = encode<fc::sha256::encoder>( data, datalen );
+         FC_ASSERT( result == hash_val, "hash mismatch" );
+      }
+
+      void assert_sha1(array_ptr<char> data, size_t datalen, const fc::sha1& hash_val) {
+         auto result = encode<fc::sha1::encoder>( data, datalen );
+         FC_ASSERT( result == hash_val, "hash mismatch" );
+      }
+
+      void assert_sha512(array_ptr<char> data, size_t datalen, const fc::sha512& hash_val) {
+         auto result = encode<fc::sha512::encoder>( data, datalen );
+         FC_ASSERT( result == hash_val, "hash mismatch" );
+      }
+
+      void assert_ripemd160(array_ptr<char> data, size_t datalen, const fc::ripemd160& hash_val) {
+         auto result = encode<fc::ripemd160::encoder>( data, datalen );
+         FC_ASSERT( result == hash_val, "hash mismatch" );
+      }
+
+      void sha1(array_ptr<char> data, size_t datalen, fc::sha1& hash_val) {
+         hash_val = encode<fc::sha1::encoder>( data, datalen );
+      }
+
+      void sha256(array_ptr<char> data, size_t datalen, fc::sha256& hash_val) {
+         hash_val = encode<fc::sha256::encoder>( data, datalen );
+      }
+
+      void sha512(array_ptr<char> data, size_t datalen, fc::sha512& hash_val) {
+         hash_val = encode<fc::sha512::encoder>( data, datalen );
+      }
+
+      void ripemd160(array_ptr<char> data, size_t datalen, fc::ripemd160& hash_val) {
+         hash_val = encode<fc::ripemd160::encoder>( data, datalen );
+      }
+};
+
+class permission_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      bool check_transaction_authorization( array_ptr<char> trx_data,     size_t trx_size,
+                                            array_ptr<char> pubkeys_data, size_t pubkeys_size,
+                                            array_ptr<char> perms_data,   size_t perms_size
+                                          )
+      {
+         transaction trx = fc::raw::unpack<transaction>( trx_data, trx_size );
+
+         flat_set<public_key_type> provided_keys;
+         unpack_provided_keys( provided_keys, pubkeys_data, pubkeys_size );
+
+         flat_set<permission_level> provided_permissions;
+         unpack_provided_permissions( provided_permissions, perms_data, perms_size );
+
+         try {
+            context.control
+                   .get_authorization_manager()
+                   .check_authorization( trx.actions,
+                                         provided_keys,
+                                         provided_permissions,
+                                         fc::seconds(trx.delay_sec),
+                                         std::bind(&transaction_context::checktime, &context.trx_context),
+                                         false
+                                       );
+            return true;
+         } catch( const authorization_exception& e ) {}
+
+         return false;
+      }
+
+      bool check_permission_authorization( account_name account, permission_name permission,
+                                           array_ptr<char> pubkeys_data, size_t pubkeys_size,
+                                           array_ptr<char> perms_data,   size_t perms_size,
+                                           uint64_t delay_us
+                                         )
+      {
+         EOS_ASSERT( delay_us <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                     action_validate_exception, "provided delay is too large" );
+
+         flat_set<public_key_type> provided_keys;
+         unpack_provided_keys( provided_keys, pubkeys_data, pubkeys_size );
+
+         flat_set<permission_level> provided_permissions;
+         unpack_provided_permissions( provided_permissions, perms_data, perms_size );
+
+         try {
+            context.control
+                   .get_authorization_manager()
+                   .check_authorization( account,
+                                         permission,
+                                         provided_keys,
+                                         provided_permissions,
+                                         fc::microseconds(delay_us),
+                                         std::bind(&transaction_context::checktime, &context.trx_context),
+                                         false
+                                       );
+            return true;
+         } catch( const authorization_exception& e ) {}
+
+         return false;
+      }
+
+      int64_t get_permission_last_used( account_name account, permission_name permission ) {
+         const auto& am = context.control.get_authorization_manager();
+         return am.get_permission_last_used( am.get_permission({account, permission}) ).time_since_epoch().count();
+      };
+
+      int64_t get_account_creation_time( account_name account ) {
+         auto* acct = context.db.find<account_object, by_name>(account);
+         EOS_ASSERT( acct != nullptr, action_validate_exception,
+                     "account '${account}' does not exist", ("account", account) );
+         return time_point(acct->creation_date).time_since_epoch().count();
+      }
+
+   private:
+      void unpack_provided_keys( flat_set<public_key_type>& keys, const char* pubkeys_data, size_t pubkeys_size ) {
+         keys.clear();
+         if( pubkeys_size == 0 ) return;
+
+         keys = fc::raw::unpack<flat_set<public_key_type>>( pubkeys_data, pubkeys_size );
+      }
+
+      void unpack_provided_permissions( flat_set<permission_level>& permissions, const char* perms_data, size_t perms_size ) {
+         permissions.clear();
+         if( perms_size == 0 ) return;
+
+         permissions = fc::raw::unpack<flat_set<permission_level>>( perms_data, perms_size );
+      }
+
+};
+
+class authorization_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+   void require_authorization( const account_name& account ) {
+      context.require_authorization( account );
    }
 
-
-   char* wasm_interface::vm_allocate( int bytes ) {
-      FunctionInstance* alloc_function = asFunctionNullable(getInstanceExport(current_module,"alloc"));
-      const FunctionType* functionType = getFunctionType(alloc_function);
-      FC_ASSERT( functionType->parameters.size() == 1 );
-      std::vector<Value> invokeArgs(1);
-      invokeArgs[0] = U32(bytes);
-
-      checktimeStart = fc::time_point::now();
-
-      auto result = Runtime::invokeFunction(alloc_function,invokeArgs);
-
-      return &memoryRef<char>( current_memory, result.i32 );
+   bool has_authorization( const account_name& account )const {
+      return context.has_authorization( account );
    }
 
-   U32 wasm_interface::vm_pointer_to_offset( char* ptr ) {
-      return U32(ptr - &memoryRef<char>(current_memory,0));
+   void require_authorization(const account_name& account,
+                                                 const permission_name& permission) {
+      context.require_authorization( account, permission );
    }
 
-   void  wasm_interface::vm_call( const char* name ) {
-   try {
-      std::unique_ptr<wasm_memory> wasm_memory_mgmt;
-      try {
+   void require_recipient( account_name recipient ) {
+      context.require_recipient( recipient );
+   }
+
+   bool is_account( const account_name& account )const {
+      return context.is_account( account );
+   }
+
+};
+
+class system_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      uint64_t current_time() {
+         return static_cast<uint64_t>( context.control.pending_block_time().time_since_epoch().count() );
+      }
+
+      uint64_t publication_time() {
+         return static_cast<uint64_t>( context.trx_context.published.time_since_epoch().count() );
+      }
+
+};
+
+class context_free_system_api :  public context_aware_api {
+public:
+   explicit context_free_system_api( apply_context& ctx )
+   :context_aware_api(ctx,true){}
+
+   void abort() {
+      edump(("abort() called"));
+      FC_ASSERT( false, "abort() called");
+   }
+
+   // Kept as intrinsic rather than implementing on WASM side (using eosio_assert_message and strlen) because strlen is faster on native side.
+   void eosio_assert( bool condition, null_terminated_ptr msg ) {
+      if( BOOST_UNLIKELY( !condition ) ) {
+         std::string message( msg );
+         edump((message));
+         EOS_THROW( eosio_assert_message_exception, "assertion failure with message: ${s}", ("s",message) );
+      }
+   }
+
+   void eosio_assert_message( bool condition, array_ptr<const char> msg, size_t msg_len ) {
+      if( BOOST_UNLIKELY( !condition ) ) {
+         std::string message( msg, msg_len );
+         edump((message));
+         EOS_THROW( eosio_assert_message_exception, "assertion failure with message: ${s}", ("s",message) );
+      }
+   }
+
+   void eosio_assert_code( bool condition, uint64_t error_code ) {
+      if( BOOST_UNLIKELY( !condition ) ) {
+         edump((error_code));
+         EOS_THROW( eosio_assert_code_exception,
+                    "assertion failure with error code: ${error_code}", ("error_code", error_code) );
+      }
+   }
+
+   void eosio_exit(int32_t code) {
+      throw wasm_exit{code};
+   }
+
+};
+
+class action_api : public context_aware_api {
+   public:
+   action_api( apply_context& ctx )
+      :context_aware_api(ctx,true){}
+
+      int read_action_data(array_ptr<char> memory, size_t buffer_size) {
+         auto s = context.act.data.size();
+         if( buffer_size == 0 ) return s;
+
+         auto copy_size = std::min( buffer_size, s );
+         memcpy( memory, context.act.data.data(), copy_size );
+
+         return copy_size;
+      }
+
+      int action_data_size() {
+         return context.act.data.size();
+      }
+
+      name current_receiver() {
+         return context.receiver;
+      }
+};
+
+class console_api : public context_aware_api {
+   public:
+      console_api( apply_context& ctx )
+      : context_aware_api(ctx,true)
+      , ignore(!ctx.control.contracts_console()) {}
+
+      // Kept as intrinsic rather than implementing on WASM side (using prints_l and strlen) because strlen is faster on native side.
+      void prints(null_terminated_ptr str) {
+         if ( !ignore ) {
+            context.console_append<const char*>(str);
+         }
+      }
+
+      void prints_l(array_ptr<const char> str, size_t str_len ) {
+         if ( !ignore ) {
+            context.console_append(string(str, str_len));
+         }
+      }
+
+      void printi(int64_t val) {
+         if ( !ignore ) {
+            context.console_append(val);
+         }
+      }
+
+      void printui(uint64_t val) {
+         if ( !ignore ) {
+            context.console_append(val);
+         }
+      }
+
+      void printi128(const __int128& val) {
+         if ( !ignore ) {
+            bool is_negative = (val < 0);
+            unsigned __int128 val_magnitude;
+
+            if( is_negative )
+               val_magnitude = static_cast<unsigned __int128>(-val); // Works even if val is at the lowest possible value of a int128_t
+            else
+               val_magnitude = static_cast<unsigned __int128>(val);
+
+            fc::uint128_t v(val_magnitude>>64, static_cast<uint64_t>(val_magnitude) );
+
+            if( is_negative ) {
+               context.console_append("-");
+            }
+
+            context.console_append(fc::variant(v).get_string());
+         }
+      }
+
+      void printui128(const unsigned __int128& val) {
+         if ( !ignore ) {
+            fc::uint128_t v(val>>64, static_cast<uint64_t>(val) );
+            context.console_append(fc::variant(v).get_string());
+         }
+      }
+
+      void printsf( float val ) {
+         if ( !ignore ) {
+            // Assumes float representation on native side is the same as on the WASM side
+            auto& console = context.get_console_stream();
+            auto orig_prec = console.precision();
+
+            console.precision( std::numeric_limits<float>::digits10 );
+            context.console_append(val);
+
+            console.precision( orig_prec );
+         }
+      }
+
+      void printdf( double val ) {
+         if ( !ignore ) {
+            // Assumes double representation on native side is the same as on the WASM side
+            auto& console = context.get_console_stream();
+            auto orig_prec = console.precision();
+
+            console.precision( std::numeric_limits<double>::digits10 );
+            context.console_append(val);
+
+            console.precision( orig_prec );
+         }
+      }
+
+      void printqf( const float128_t& val ) {
          /*
-         name += "_" + std::string( current_validate_context->msg.code ) + "_";
-         name += std::string( current_validate_context->msg.type );
-         */
-         /// TODO: cache this somehow
-         FunctionInstance* call = asFunctionNullable(getInstanceExport(current_module,name) );
-         if( !call ) {
-            //wlog( "unable to find call ${name}", ("name",name));
-            return;
+          * Native-side long double uses an 80-bit extended-precision floating-point number.
+          * The easiest solution for now was to use the Berkeley softfloat library to round the 128-bit
+          * quadruple-precision floating-point number to an 80-bit extended-precision floating-point number
+          * (losing precision) which then allows us to simply cast it into a long double for printing purposes.
+          *
+          * Later we might find a better solution to print the full quadruple-precision floating-point number.
+          * Maybe with some compilation flag that turns long double into a quadruple-precision floating-point number,
+          * or maybe with some library that allows us to print out quadruple-precision floating-point numbers without
+          * having to deal with long doubles at all.
+          */
+
+         if ( !ignore ) {
+            auto& console = context.get_console_stream();
+            auto orig_prec = console.precision();
+
+            console.precision( std::numeric_limits<long double>::digits10 );
+
+            extFloat80_t val_approx;
+            f128M_to_extF80M(&val, &val_approx);
+            context.console_append( *(long double*)(&val_approx) );
+
+            console.precision( orig_prec );
          }
-         //FC_ASSERT( apply, "no entry point found for ${call}", ("call", std::string(name))  );
-
-         FC_ASSERT( getFunctionType(call)->parameters.size() == 2 );
-
-  //       idump((current_validate_context->msg.code)(current_validate_context->msg.type)(current_validate_context->code));
-         std::vector<Value> args = { Value(uint64_t(current_validate_context->msg.code)),
-                                     Value(uint64_t(current_validate_context->msg.type)) };
-
-         auto& state = *current_state;
-         char* memstart = &memoryRef<char>( current_memory, 0 );
-         memset( memstart + state.mem_end, 0, ((1<<16) - state.mem_end) );
-         memcpy( memstart, state.init_memory.data(), state.mem_end);
-
-         checktimeStart = fc::time_point::now();
-         wasm_memory_mgmt.reset(new wasm_memory(*this));
-
-         Runtime::invokeFunction(call,args);
-         wasm_memory_mgmt.reset();
-         checktime(current_execution_time(), checktime_limit);
-      } catch( const Runtime::Exception& e ) {
-          edump((std::string(describeExceptionCause(e.cause))));
-          edump((e.callStack));
-          throw;
       }
-   } FC_CAPTURE_AND_RETHROW( (name)(current_validate_context->msg.type) ) }
 
-   void  wasm_interface::vm_apply()        { vm_call("apply" );          }
-
-   void  wasm_interface::vm_onInit()
-   { try {
-      try {
-         FunctionInstance* apply = asFunctionNullable(getInstanceExport(current_module,"init"));
-         if( !apply ) {
-            elog( "no onInit method found" );
-            return; /// if not found then it is a no-op
+      void printn(const name& value) {
+         if ( !ignore ) {
+            context.console_append(value.to_string());
          }
-
-         checktimeStart = fc::time_point::now();
-
-         const FunctionType* functionType = getFunctionType(apply);
-         FC_ASSERT( functionType->parameters.size() == 0 );
-
-         std::vector<Value> args(0);
-
-         Runtime::invokeFunction(apply,args);
-      } catch( const Runtime::Exception& e ) {
-         edump((std::string(describeExceptionCause(e.cause))));
-         edump((e.callStack));
-         throw;
       }
-   } FC_CAPTURE_AND_RETHROW() }
 
-   void wasm_interface::validate( apply_context& c ) {
-      /*
-      current_validate_context       = &c;
-      current_precondition_context   = nullptr;
-      current_apply_context          = nullptr;
-
-      load( c.code, c.db );
-      vm_validate();
-      */
-   }
-   void wasm_interface::precondition( apply_context& c ) {
-   try {
-
-      /*
-      current_validate_context       = &c;
-      current_precondition_context   = &c;
-
-      load( c.code, c.db );
-      vm_precondition();
-      */
-
-   } FC_CAPTURE_AND_RETHROW() }
-
-
-   void wasm_interface::apply( apply_context& c, uint32_t execution_time, bool received_block ) {
-    try {
-      current_validate_context       = &c;
-      current_precondition_context   = &c;
-      current_apply_context          = &c;
-      checktime_limit                = execution_time;
-
-      load( c.code, c.db );
-      // if this is a received_block, then ignore the table_key_types
-      if (received_block)
-         table_key_types = nullptr;
-
-      auto rate_limiting = c.db.find<rate_limiting_object, by_name>(c.code);
-      if (rate_limiting == nullptr)
-      {
-         c.mutable_db.create<rate_limiting_object>([code=c.code](rate_limiting_object& rlo) {
-            rlo.name = code;
-            rlo.per_code_account_db_bytes = 0;
-         });
+      void printhex(array_ptr<const char> data, size_t data_len ) {
+         if ( !ignore ) {
+            context.console_append(fc::to_hex(data, data_len));
+         }
       }
-      else
-         table_storage = rate_limiting->per_code_account_db_bytes;
 
-      vm_apply();
+   private:
+      bool ignore;
+};
 
-      EOS_ASSERT(table_storage <= (per_code_account_max_db_limit_mbytes * bytes_per_mbyte), tx_code_db_limit_exceeded, "Database limit exceeded for account=${name}",("name", c.code));
-
-      rate_limiting = c.db.find<rate_limiting_object, by_name>(c.code);
-      c.mutable_db.modify(*rate_limiting, [storage=this->table_storage] (rate_limiting_object& rlo) {
-         rlo.per_code_account_db_bytes = storage;
-      });
-   } FC_CAPTURE_AND_RETHROW() }
-
-   void wasm_interface::init( apply_context& c ) {
-    try {
-      current_validate_context       = &c;
-      current_precondition_context   = &c;
-      current_apply_context          = &c;
-      checktime_limit                = CHECKTIME_LIMIT;
-
-      load( c.code, c.db );
-
-      auto rate_limiting = c.db.find<rate_limiting_object, by_name>(c.code);
-      if (rate_limiting == nullptr)
-      {
-         c.mutable_db.create<rate_limiting_object>([code=c.code](rate_limiting_object& rlo) {
-            rlo.name = code;
-            rlo.per_code_account_db_bytes = 0;
-         });
+#define DB_API_METHOD_WRAPPERS_SIMPLE_SECONDARY(IDX, TYPE)\
+      int db_##IDX##_store( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, const TYPE& secondary ) {\
+         return context.IDX.store( scope, table, payer, id, secondary );\
+      }\
+      void db_##IDX##_update( int iterator, uint64_t payer, const TYPE& secondary ) {\
+         return context.IDX.update( iterator, payer, secondary );\
+      }\
+      void db_##IDX##_remove( int iterator ) {\
+         return context.IDX.remove( iterator );\
+      }\
+      int db_##IDX##_find_secondary( uint64_t code, uint64_t scope, uint64_t table, const TYPE& secondary, uint64_t& primary ) {\
+         return context.IDX.find_secondary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_find_primary( uint64_t code, uint64_t scope, uint64_t table, TYPE& secondary, uint64_t primary ) {\
+         return context.IDX.find_primary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_lowerbound( uint64_t code, uint64_t scope, uint64_t table,  TYPE& secondary, uint64_t& primary ) {\
+         return context.IDX.lowerbound_secondary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_upperbound( uint64_t code, uint64_t scope, uint64_t table,  TYPE& secondary, uint64_t& primary ) {\
+         return context.IDX.upperbound_secondary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_end( uint64_t code, uint64_t scope, uint64_t table ) {\
+         return context.IDX.end_secondary(code, scope, table);\
+      }\
+      int db_##IDX##_next( int iterator, uint64_t& primary  ) {\
+         return context.IDX.next_secondary(iterator, primary);\
+      }\
+      int db_##IDX##_previous( int iterator, uint64_t& primary ) {\
+         return context.IDX.previous_secondary(iterator, primary);\
       }
-      else
-         table_storage = rate_limiting->per_code_account_db_bytes;
 
-      vm_onInit();
-
-      EOS_ASSERT(table_storage <= (per_code_account_max_db_limit_mbytes * bytes_per_mbyte), tx_code_db_limit_exceeded, "Database limit exceeded for account=${name}",("name", c.code));
-
-      rate_limiting = c.db.find<rate_limiting_object, by_name>(c.code);
-      c.mutable_db.modify(*rate_limiting, [storage=this->table_storage] (rate_limiting_object& rlo) {
-         rlo.per_code_account_db_bytes = storage;
-      });
-   } FC_CAPTURE_AND_RETHROW() }
-
-
-
-   void wasm_interface::load( const account_name& name, const chainbase::database& db ) {
-      const auto& recipient = db.get<account_object,by_name>( name );
-  //    idump(("recipient")(name(name))(recipient.code_version));
-
-      auto& state = instances[name];
-      if( state.code_version != recipient.code_version ) {
-        if( state.instance ) {
-           /// TODO: free existing instance and module
-#warning TODO: free existing module if the code has been updated, currently leak memory
-           state.instance     = nullptr;
-           state.module       = nullptr;
-           state.code_version = fc::sha256();
-        }
-        state.module = new IR::Module();
-        state.table_key_types.clear();
-
-        try
-        {
-//          wlog( "LOADING CODE" );
-          const auto start = fc::time_point::now();
-          Serialization::MemoryInputStream stream((const U8*)recipient.code.data(),recipient.code.size());
-          WASM::serializeWithInjection(stream,*state.module);
-
-          RootResolver rootResolver;
-          LinkResult linkResult = linkModule(*state.module,rootResolver);
-          state.instance = instantiateModule( *state.module, std::move(linkResult.resolvedImports) );
-          FC_ASSERT( state.instance );
-          const auto llvm_time = fc::time_point::now();
-
-          current_memory = Runtime::getDefaultMemory(state.instance);
-
-          char* memstart = &memoryRef<char>( current_memory, 0 );
-         // state.init_memory.resize(1<<16); /// TODO: actually get memory size
-          const auto allocated_memory = Runtime::getDefaultMemorySize(state.instance);
-          for( uint64_t i = 0; i < allocated_memory; ++i )
-          {
-             if( memstart[i] )
-             {
-                state.mem_end = i+1;
-             }
-          }
-          //ilog( "INIT MEMORY: ${size}", ("size", state.mem_end) );
-
-          state.init_memory.resize(state.mem_end);
-          memcpy( state.init_memory.data(), memstart, state.mem_end ); //state.init_memory.size() );
-          //std::cerr <<"\n";
-          state.code_version = recipient.code_version;
-//          idump((state.code_version));
-          const auto init_time = fc::time_point::now();
-
-          types::abi abi;
-          if( types::abi_serializer::to_abi(recipient.abi, abi) )
-          {
-             state.tables_fixed = true;
-             for(auto& table : abi.tables)
-             {
-                const auto key_type = to_key_type(table.index_type);
-                if (key_type == invalid_key_type)
-                   throw Serialization::FatalSerializationException("For code \"" + (std::string)name + "\" index_type of \"" +
-                                                                    table.index_type + "\" referenced but not supported");
-
-                state.table_key_types.emplace(std::make_pair(table.table_name, key_type));
-             }
-          }
-          ilog("wasm_interface::load name = ${n} times llvm:${llvm} ms, init:${init} ms, abi:${abi} ms",
-               ("n",name)("llvm",(llvm_time-start).count()/1000)("init",(init_time-llvm_time).count()/1000)("abi",(fc::time_point::now()-init_time).count()/1000));
-        }
-        catch(Serialization::FatalSerializationException exception)
-        {
-          std::cerr << "Error deserializing WebAssembly binary file:" << std::endl;
-          std::cerr << exception.message << std::endl;
-          throw;
-        }
-        catch(IR::ValidationException exception)
-        {
-          std::cerr << "Error validating WebAssembly binary file:" << std::endl;
-          std::cerr << exception.message << std::endl;
-          throw;
-        }
-        catch(std::bad_alloc)
-        {
-          std::cerr << "Memory allocation failed: input is likely malformed" << std::endl;
-          throw;
-        }
+#define DB_API_METHOD_WRAPPERS_ARRAY_SECONDARY(IDX, ARR_SIZE, ARR_ELEMENT_TYPE)\
+      int db_##IDX##_store( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, array_ptr<const ARR_ELEMENT_TYPE> data, size_t data_len) {\
+         FC_ASSERT( data_len == ARR_SIZE,\
+                    "invalid size of secondary key array for " #IDX ": given ${given} bytes but expected ${expected} bytes",\
+                    ("given",data_len)("expected",ARR_SIZE) );\
+         return context.IDX.store(scope, table, payer, id, data.value);\
+      }\
+      void db_##IDX##_update( int iterator, uint64_t payer, array_ptr<const ARR_ELEMENT_TYPE> data, size_t data_len ) {\
+         FC_ASSERT( data_len == ARR_SIZE,\
+                    "invalid size of secondary key array for " #IDX ": given ${given} bytes but expected ${expected} bytes",\
+                    ("given",data_len)("expected",ARR_SIZE) );\
+         return context.IDX.update(iterator, payer, data.value);\
+      }\
+      void db_##IDX##_remove( int iterator ) {\
+         return context.IDX.remove(iterator);\
+      }\
+      int db_##IDX##_find_secondary( uint64_t code, uint64_t scope, uint64_t table, array_ptr<const ARR_ELEMENT_TYPE> data, size_t data_len, uint64_t& primary ) {\
+         FC_ASSERT( data_len == ARR_SIZE,\
+                    "invalid size of secondary key array for " #IDX ": given ${given} bytes but expected ${expected} bytes",\
+                    ("given",data_len)("expected",ARR_SIZE) );\
+         return context.IDX.find_secondary(code, scope, table, data, primary);\
+      }\
+      int db_##IDX##_find_primary( uint64_t code, uint64_t scope, uint64_t table, array_ptr<ARR_ELEMENT_TYPE> data, size_t data_len, uint64_t primary ) {\
+         FC_ASSERT( data_len == ARR_SIZE,\
+                    "invalid size of secondary key array for " #IDX ": given ${given} bytes but expected ${expected} bytes",\
+                    ("given",data_len)("expected",ARR_SIZE) );\
+         return context.IDX.find_primary(code, scope, table, data.value, primary);\
+      }\
+      int db_##IDX##_lowerbound( uint64_t code, uint64_t scope, uint64_t table, array_ptr<ARR_ELEMENT_TYPE> data, size_t data_len, uint64_t& primary ) {\
+         FC_ASSERT( data_len == ARR_SIZE,\
+                    "invalid size of secondary key array for " #IDX ": given ${given} bytes but expected ${expected} bytes",\
+                    ("given",data_len)("expected",ARR_SIZE) );\
+         return context.IDX.lowerbound_secondary(code, scope, table, data.value, primary);\
+      }\
+      int db_##IDX##_upperbound( uint64_t code, uint64_t scope, uint64_t table, array_ptr<ARR_ELEMENT_TYPE> data, size_t data_len, uint64_t& primary ) {\
+         FC_ASSERT( data_len == ARR_SIZE,\
+                    "invalid size of secondary key array for " #IDX ": given ${given} bytes but expected ${expected} bytes",\
+                    ("given",data_len)("expected",ARR_SIZE) );\
+         return context.IDX.upperbound_secondary(code, scope, table, data.value, primary);\
+      }\
+      int db_##IDX##_end( uint64_t code, uint64_t scope, uint64_t table ) {\
+         return context.IDX.end_secondary(code, scope, table);\
+      }\
+      int db_##IDX##_next( int iterator, uint64_t& primary  ) {\
+         return context.IDX.next_secondary(iterator, primary);\
+      }\
+      int db_##IDX##_previous( int iterator, uint64_t& primary ) {\
+         return context.IDX.previous_secondary(iterator, primary);\
       }
-      current_module      = state.instance;
-      current_memory      = getDefaultMemory( current_module );
-      current_state       = &state;
-      table_key_types     = &state.table_key_types;
-      tables_fixed        = state.tables_fixed;
-      table_storage       = 0;
-   }
 
-   wasm_memory::wasm_memory(wasm_interface& interface)
-   : _wasm_interface(interface)
-   , _num_pages(Runtime::getMemoryNumPages(interface.current_memory))
-   , _min_bytes(limit_32bit_address(_num_pages << numBytesPerPageLog2))
-   {
-      _wasm_interface.current_memory_management = this;
-      _num_bytes = _min_bytes;
-   }
+#define DB_API_METHOD_WRAPPERS_FLOAT_SECONDARY(IDX, TYPE)\
+      int db_##IDX##_store( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, const TYPE& secondary ) {\
+         EOS_ASSERT( !softfloat_api::is_nan( secondary ), transaction_exception, "NaN is not an allowed value for a secondary key" );\
+         return context.IDX.store( scope, table, payer, id, secondary );\
+      }\
+      void db_##IDX##_update( int iterator, uint64_t payer, const TYPE& secondary ) {\
+         EOS_ASSERT( !softfloat_api::is_nan( secondary ), transaction_exception, "NaN is not an allowed value for a secondary key" );\
+         return context.IDX.update( iterator, payer, secondary );\
+      }\
+      void db_##IDX##_remove( int iterator ) {\
+         return context.IDX.remove( iterator );\
+      }\
+      int db_##IDX##_find_secondary( uint64_t code, uint64_t scope, uint64_t table, const TYPE& secondary, uint64_t& primary ) {\
+         EOS_ASSERT( !softfloat_api::is_nan( secondary ), transaction_exception, "NaN is not an allowed value for a secondary key" );\
+         return context.IDX.find_secondary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_find_primary( uint64_t code, uint64_t scope, uint64_t table, TYPE& secondary, uint64_t primary ) {\
+         return context.IDX.find_primary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_lowerbound( uint64_t code, uint64_t scope, uint64_t table,  TYPE& secondary, uint64_t& primary ) {\
+         EOS_ASSERT( !softfloat_api::is_nan( secondary ), transaction_exception, "NaN is not an allowed value for a secondary key" );\
+         return context.IDX.lowerbound_secondary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_upperbound( uint64_t code, uint64_t scope, uint64_t table,  TYPE& secondary, uint64_t& primary ) {\
+         EOS_ASSERT( !softfloat_api::is_nan( secondary ), transaction_exception, "NaN is not an allowed value for a secondary key" );\
+         return context.IDX.upperbound_secondary(code, scope, table, secondary, primary);\
+      }\
+      int db_##IDX##_end( uint64_t code, uint64_t scope, uint64_t table ) {\
+         return context.IDX.end_secondary(code, scope, table);\
+      }\
+      int db_##IDX##_next( int iterator, uint64_t& primary  ) {\
+         return context.IDX.next_secondary(iterator, primary);\
+      }\
+      int db_##IDX##_previous( int iterator, uint64_t& primary ) {\
+         return context.IDX.previous_secondary(iterator, primary);\
+      }
 
-   wasm_memory::~wasm_memory()
-   {
-      if (_num_bytes > _min_bytes)
-         sbrk((I32)_min_bytes - (I32)_num_bytes);
+class database_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
 
-      _wasm_interface.current_memory_management = nullptr;
-   }
+      int db_store_i64( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, array_ptr<const char> buffer, size_t buffer_size ) {
+         return context.db_store_i64( scope, table, payer, id, buffer, buffer_size );
+      }
+      void db_update_i64( int itr, uint64_t payer, array_ptr<const char> buffer, size_t buffer_size ) {
+         context.db_update_i64( itr, payer, buffer, buffer_size );
+      }
+      void db_remove_i64( int itr ) {
+         context.db_remove_i64( itr );
+      }
+      int db_get_i64( int itr, array_ptr<char> buffer, size_t buffer_size ) {
+         return context.db_get_i64( itr, buffer, buffer_size );
+      }
+      int db_next_i64( int itr, uint64_t& primary ) {
+         return context.db_next_i64(itr, primary);
+      }
+      int db_previous_i64( int itr, uint64_t& primary ) {
+         return context.db_previous_i64(itr, primary);
+      }
+      int db_find_i64( uint64_t code, uint64_t scope, uint64_t table, uint64_t id ) {
+         return context.db_find_i64( code, scope, table, id );
+      }
+      int db_lowerbound_i64( uint64_t code, uint64_t scope, uint64_t table, uint64_t id ) {
+         return context.db_lowerbound_i64( code, scope, table, id );
+      }
+      int db_upperbound_i64( uint64_t code, uint64_t scope, uint64_t table, uint64_t id ) {
+         return context.db_upperbound_i64( code, scope, table, id );
+      }
+      int db_end_i64( uint64_t code, uint64_t scope, uint64_t table ) {
+         return context.db_end_i64( code, scope, table );
+      }
 
-   U32 wasm_memory::sbrk(I32 num_bytes)
-   {
-      const U32 previous_num_bytes = _num_bytes;
-      if(Runtime::getMemoryNumPages(_wasm_interface.current_memory) != _num_pages)
-         throw eosio::chain::page_memory_error();
+      DB_API_METHOD_WRAPPERS_SIMPLE_SECONDARY(idx64,  uint64_t)
+      DB_API_METHOD_WRAPPERS_SIMPLE_SECONDARY(idx128, uint128_t)
+      DB_API_METHOD_WRAPPERS_ARRAY_SECONDARY(idx256, 2, uint128_t)
+      DB_API_METHOD_WRAPPERS_FLOAT_SECONDARY(idx_double, float64_t)
+      DB_API_METHOD_WRAPPERS_FLOAT_SECONDARY(idx_long_double, float128_t)
+};
 
-      // Round the absolute value of num_bytes to an alignment boundary, and ensure it won't allocate too much or too little memory.
-      num_bytes = (num_bytes + 7) & ~7;
-      if(num_bytes > 0 && previous_num_bytes > _max_memory - num_bytes)
-         throw eosio::chain::page_memory_error();
-      else if(num_bytes < 0 && previous_num_bytes < _min_bytes - num_bytes)
-         throw eosio::chain::page_memory_error();
+class memory_api : public context_aware_api {
+   public:
+      memory_api( apply_context& ctx )
+      :context_aware_api(ctx,true){}
 
-      // Update the number of bytes allocated, and compute the number of pages needed for it.
-      _num_bytes += num_bytes;
-      const Uptr num_desired_pages = (_num_bytes + IR::numBytesPerPage - 1) >> IR::numBytesPerPageLog2;
+      char* memcpy( array_ptr<char> dest, array_ptr<const char> src, size_t length) {
+         EOS_ASSERT((std::abs((ptrdiff_t)dest.value - (ptrdiff_t)src.value)) >= length,
+               overlapping_memory_error, "memcpy can only accept non-aliasing pointers");
+         return (char *)::memcpy(dest, src, length);
+      }
 
-      // Grow or shrink the memory object to the desired number of pages.
-      if(num_desired_pages > _num_pages)
-         Runtime::growMemory(_wasm_interface.current_memory, num_desired_pages - _num_pages);
-      else if(num_desired_pages < _num_pages)
-         Runtime::shrinkMemory(_wasm_interface.current_memory, _num_pages - num_desired_pages);
+      char* memmove( array_ptr<char> dest, array_ptr<const char> src, size_t length) {
+         return (char *)::memmove(dest, src, length);
+      }
 
-      _num_pages = num_desired_pages;
+      int memcmp( array_ptr<const char> dest, array_ptr<const char> src, size_t length) {
+         int ret = ::memcmp(dest, src, length);
+         if(ret < 0)
+            return -1;
+         if(ret > 0)
+            return 1;
+         return 0;
+      }
 
-      return previous_num_bytes;
-   }
+      char* memset( array_ptr<char> dest, int value, size_t length ) {
+         return (char *)::memset( dest, value, length );
+      }
+};
 
-   U32 wasm_memory::limit_32bit_address(Uptr address)
-   {
-      return (U32)(address > UINT32_MAX ? UINT32_MAX : address);
-   }
+class transaction_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
 
-} }
+      void send_inline( array_ptr<char> data, size_t data_len ) {
+         //TODO: Why is this limit even needed? And why is it not consistently checked on actions in input or deferred transactions
+         FC_ASSERT( data_len < context.control.get_global_properties().configuration.max_inline_action_size,
+                    "inline action too big" );
+
+         action act;
+         fc::raw::unpack<action>(data, data_len, act);
+         context.execute_inline(std::move(act));
+      }
+
+      void send_context_free_inline( array_ptr<char> data, size_t data_len ) {
+         //TODO: Why is this limit even needed? And why is it not consistently checked on actions in input or deferred transactions
+         FC_ASSERT( data_len < context.control.get_global_properties().configuration.max_inline_action_size,
+                   "inline action too big" );
+
+         action act;
+         fc::raw::unpack<action>(data, data_len, act);
+         context.execute_context_free_inline(std::move(act));
+      }
+
+      void send_deferred( const uint128_t& sender_id, account_name payer, array_ptr<char> data, size_t data_len, uint32_t replace_existing) {
+         try {
+            transaction trx;
+            fc::raw::unpack<transaction>(data, data_len, trx);
+            context.schedule_deferred_transaction(sender_id, payer, std::move(trx), replace_existing);
+         } FC_CAPTURE_AND_RETHROW((fc::to_hex(data, data_len)));
+      }
+
+      bool cancel_deferred( const unsigned __int128& val ) {
+         fc::uint128_t sender_id(val>>64, uint64_t(val) );
+         return context.cancel_deferred_transaction( (unsigned __int128)sender_id );
+      }
+};
+
+
+class context_free_transaction_api : public context_aware_api {
+   public:
+      context_free_transaction_api( apply_context& ctx )
+      :context_aware_api(ctx,true){}
+
+      int read_transaction( array_ptr<char> data, size_t buffer_size ) {
+         bytes trx = context.get_packed_transaction();
+
+         auto s = trx.size();
+         if( buffer_size == 0) return s;
+
+         auto copy_size = std::min( buffer_size, s );
+         memcpy( data, trx.data(), copy_size );
+
+         return copy_size;
+      }
+
+      int transaction_size() {
+         return context.get_packed_transaction().size();
+      }
+
+      int expiration() {
+        return context.trx_context.trx.expiration.sec_since_epoch();
+      }
+
+      int tapos_block_num() {
+        return context.trx_context.trx.ref_block_num;
+      }
+      int tapos_block_prefix() {
+        return context.trx_context.trx.ref_block_prefix;
+      }
+
+      int get_action( uint32_t type, uint32_t index, array_ptr<char> buffer, size_t buffer_size )const {
+         return context.get_action( type, index, buffer, buffer_size );
+      }
+};
+
+class compiler_builtins : public context_aware_api {
+   public:
+      compiler_builtins( apply_context& ctx )
+      :context_aware_api(ctx,true){}
+
+      void __ashlti3(__int128& ret, uint64_t low, uint64_t high, uint32_t shift) {
+         fc::uint128_t i(high, low);
+         i <<= shift;
+         ret = (unsigned __int128)i;
+      }
+
+      void __ashrti3(__int128& ret, uint64_t low, uint64_t high, uint32_t shift) {
+         // retain the signedness
+         ret = high;
+         ret <<= 64;
+         ret |= low;
+         ret >>= shift;
+      }
+
+      void __lshlti3(__int128& ret, uint64_t low, uint64_t high, uint32_t shift) {
+         fc::uint128_t i(high, low);
+         i <<= shift;
+         ret = (unsigned __int128)i;
+      }
+
+      void __lshrti3(__int128& ret, uint64_t low, uint64_t high, uint32_t shift) {
+         fc::uint128_t i(high, low);
+         i >>= shift;
+         ret = (unsigned __int128)i;
+      }
+
+      void __divti3(__int128& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb) {
+         __int128 lhs = ha;
+         __int128 rhs = hb;
+
+         lhs <<= 64;
+         lhs |=  la;
+
+         rhs <<= 64;
+         rhs |=  lb;
+
+         FC_ASSERT(rhs != 0, "divide by zero");
+
+         lhs /= rhs;
+
+         ret = lhs;
+      }
+
+      void __udivti3(unsigned __int128& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb) {
+         unsigned __int128 lhs = ha;
+         unsigned __int128 rhs = hb;
+
+         lhs <<= 64;
+         lhs |=  la;
+
+         rhs <<= 64;
+         rhs |=  lb;
+
+         FC_ASSERT(rhs != 0, "divide by zero");
+
+         lhs /= rhs;
+         ret = lhs;
+      }
+
+      void __multi3(__int128& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb) {
+         __int128 lhs = ha;
+         __int128 rhs = hb;
+
+         lhs <<= 64;
+         lhs |=  la;
+
+         rhs <<= 64;
+         rhs |=  lb;
+
+         lhs *= rhs;
+         ret = lhs;
+      }
+
+      void __modti3(__int128& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb) {
+         __int128 lhs = ha;
+         __int128 rhs = hb;
+
+         lhs <<= 64;
+         lhs |=  la;
+
+         rhs <<= 64;
+         rhs |=  lb;
+
+         FC_ASSERT(rhs != 0, "divide by zero");
+
+         lhs %= rhs;
+         ret = lhs;
+      }
+
+      void __umodti3(unsigned __int128& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb) {
+         unsigned __int128 lhs = ha;
+         unsigned __int128 rhs = hb;
+
+         lhs <<= 64;
+         lhs |=  la;
+
+         rhs <<= 64;
+         rhs |=  lb;
+
+         FC_ASSERT(rhs != 0, "divide by zero");
+
+         lhs %= rhs;
+         ret = lhs;
+      }
+
+      // arithmetic long double
+      void __addtf3( float128_t& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         float128_t a = {{ la, ha }};
+         float128_t b = {{ lb, hb }};
+         ret = f128_add( a, b );
+      }
+      void __subtf3( float128_t& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         float128_t a = {{ la, ha }};
+         float128_t b = {{ lb, hb }};
+         ret = f128_sub( a, b );
+      }
+      void __multf3( float128_t& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         float128_t a = {{ la, ha }};
+         float128_t b = {{ lb, hb }};
+         ret = f128_mul( a, b );
+      }
+      void __divtf3( float128_t& ret, uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         float128_t a = {{ la, ha }};
+         float128_t b = {{ lb, hb }};
+         ret = f128_div( a, b );
+      }
+      void __negtf2( float128_t& ret, uint64_t la, uint64_t ha ) {
+         ret = {{ la, (ha ^ (uint64_t)1 << 63) }};
+      }
+
+      // conversion long double
+      void __extendsftf2( float128_t& ret, float f ) {
+         ret = f32_to_f128( softfloat_api::to_softfloat32(f) );
+      }
+      void __extenddftf2( float128_t& ret, double d ) {
+         ret = f64_to_f128( softfloat_api::to_softfloat64(d) );
+      }
+      double __trunctfdf2( uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         return softfloat_api::from_softfloat64(f128_to_f64( f ));
+      }
+      float __trunctfsf2( uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         return softfloat_api::from_softfloat32(f128_to_f32( f ));
+      }
+      int32_t __fixtfsi( uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         return f128_to_i32( f, 0, false );
+      }
+      int64_t __fixtfdi( uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         return f128_to_i64( f, 0, false );
+      }
+      void __fixtfti( __int128& ret, uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         ret = ___fixtfti( f );
+      }
+      uint32_t __fixunstfsi( uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         return f128_to_ui32( f, 0, false );
+      }
+      uint64_t __fixunstfdi( uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         return f128_to_ui64( f, 0, false );
+      }
+      void __fixunstfti( unsigned __int128& ret, uint64_t l, uint64_t h ) {
+         float128_t f = {{ l, h }};
+         ret = ___fixunstfti( f );
+      }
+      void __fixsfti( __int128& ret, float a ) {
+         ret = ___fixsfti( softfloat_api::to_softfloat32(a).v );
+      }
+      void __fixdfti( __int128& ret, double a ) {
+         ret = ___fixdfti( softfloat_api::to_softfloat64(a).v );
+      }
+      void __fixunssfti( unsigned __int128& ret, float a ) {
+         ret = ___fixunssfti( softfloat_api::to_softfloat32(a).v );
+      }
+      void __fixunsdfti( unsigned __int128& ret, double a ) {
+         ret = ___fixunsdfti( softfloat_api::to_softfloat64(a).v );
+      }
+      double __floatsidf( int32_t i ) {
+         return softfloat_api::from_softfloat64(i32_to_f64(i));
+      }
+      void __floatsitf( float128_t& ret, int32_t i ) {
+         ret = i32_to_f128(i);
+      }
+      void __floatditf( float128_t& ret, uint64_t a ) {
+         ret = i64_to_f128( a );
+      }
+      void __floatunsitf( float128_t& ret, uint32_t i ) {
+         ret = ui32_to_f128(i);
+      }
+      void __floatunditf( float128_t& ret, uint64_t a ) {
+         ret = ui64_to_f128( a );
+      }
+      double __floattidf( uint64_t l, uint64_t h ) {
+         fc::uint128_t v(h, l);
+         unsigned __int128 val = (unsigned __int128)v;
+         return ___floattidf( *(__int128*)&val );
+      }
+      double __floatuntidf( uint64_t l, uint64_t h ) {
+         fc::uint128_t v(h, l);
+         return ___floatuntidf( (unsigned __int128)v );
+      }
+      int ___cmptf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb, int return_value_if_nan ) {
+         float128_t a = {{ la, ha }};
+         float128_t b = {{ lb, hb }};
+         if ( __unordtf2(la, ha, lb, hb) )
+            return return_value_if_nan;
+         if ( f128_lt( a, b ) )
+            return -1;
+         if ( f128_eq( a, b ) )
+            return 0;
+         return 1;
+      }
+      int __eqtf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, 1);
+      }
+      int __netf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, 1);
+      }
+      int __getf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, -1);
+      }
+      int __gttf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, 0);
+      }
+      int __letf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, 1);
+      }
+      int __lttf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, 0);
+      }
+      int __cmptf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         return ___cmptf2(la, ha, lb, hb, 1);
+      }
+      int __unordtf2( uint64_t la, uint64_t ha, uint64_t lb, uint64_t hb ) {
+         float128_t a = {{ la, ha }};
+         float128_t b = {{ lb, hb }};
+         if ( softfloat_api::is_nan(a) || softfloat_api::is_nan(b) )
+            return 1;
+         return 0;
+      }
+
+      static constexpr uint32_t SHIFT_WIDTH = (sizeof(uint64_t)*8)-1;
+};
+
+
+/*
+ * This api will be removed with fix for `eos #2561`
+ */
+class call_depth_api : public context_aware_api {
+   public:
+      call_depth_api( apply_context& ctx )
+      :context_aware_api(ctx,true){}
+      void call_depth_assert() {
+         FC_THROW_EXCEPTION(wasm_execution_error, "Exceeded call depth maximum");
+      }
+};
+
+REGISTER_INJECTED_INTRINSICS(call_depth_api,
+   (call_depth_assert,  void()               )
+);
+
+REGISTER_INTRINSICS(compiler_builtins,
+   (__ashlti3,     void(int, int64_t, int64_t, int)               )
+   (__ashrti3,     void(int, int64_t, int64_t, int)               )
+   (__lshlti3,     void(int, int64_t, int64_t, int)               )
+   (__lshrti3,     void(int, int64_t, int64_t, int)               )
+   (__divti3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__udivti3,     void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__modti3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__umodti3,     void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__multi3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__addtf3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__subtf3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__multf3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__divtf3,      void(int, int64_t, int64_t, int64_t, int64_t)  )
+   (__eqtf2,       int(int64_t, int64_t, int64_t, int64_t)        )
+   (__netf2,       int(int64_t, int64_t, int64_t, int64_t)        )
+   (__getf2,       int(int64_t, int64_t, int64_t, int64_t)        )
+   (__gttf2,       int(int64_t, int64_t, int64_t, int64_t)        )
+   (__lttf2,       int(int64_t, int64_t, int64_t, int64_t)        )
+   (__letf2,       int(int64_t, int64_t, int64_t, int64_t)        )
+   (__cmptf2,      int(int64_t, int64_t, int64_t, int64_t)        )
+   (__unordtf2,    int(int64_t, int64_t, int64_t, int64_t)        )
+   (__negtf2,      void (int, int64_t, int64_t)                   )
+   (__floatsitf,   void (int, int)                                )
+   (__floatunsitf, void (int, int)                                )
+   (__floatditf,   void (int, int64_t)                            )
+   (__floatunditf, void (int, int64_t)                            )
+   (__floattidf,   double (int64_t, int64_t)                      )
+   (__floatuntidf, double (int64_t, int64_t)                      )
+   (__floatsidf,   double(int)                                    )
+   (__extendsftf2, void(int, float)                               )
+   (__extenddftf2, void(int, double)                              )
+   (__fixtfti,     void(int, int64_t, int64_t)                    )
+   (__fixtfdi,     int64_t(int64_t, int64_t)                      )
+   (__fixtfsi,     int(int64_t, int64_t)                          )
+   (__fixunstfti,  void(int, int64_t, int64_t)                    )
+   (__fixunstfdi,  int64_t(int64_t, int64_t)                      )
+   (__fixunstfsi,  int(int64_t, int64_t)                          )
+   (__fixsfti,     void(int, float)                               )
+   (__fixdfti,     void(int, double)                              )
+   (__fixunssfti,  void(int, float)                               )
+   (__fixunsdfti,  void(int, double)                              )
+   (__trunctfdf2,  double(int64_t, int64_t)                       )
+   (__trunctfsf2,  float(int64_t, int64_t)                        )
+);
+
+REGISTER_INTRINSICS(privileged_api,
+   (is_feature_active,                int(int64_t)                          )
+   (activate_feature,                 void(int64_t)                         )
+   (get_resource_limits,              void(int64_t,int,int,int)             )
+   (set_resource_limits,              void(int64_t,int64_t,int64_t,int64_t) )
+   (set_proposed_producers,           int64_t(int,int)                      )
+   (get_blockchain_parameters_packed, int(int, int)                         )
+   (set_blockchain_parameters_packed, void(int,int)                         )
+   (is_privileged,                    int(int64_t)                          )
+   (set_privileged,                   void(int64_t, int)                    )
+);
+
+REGISTER_INJECTED_INTRINSICS(transaction_context,
+   (checktime,      void())
+);
+
+REGISTER_INTRINSICS(producer_api,
+   (get_active_producers,      int(int, int) )
+);
+
+#define DB_SECONDARY_INDEX_METHODS_SIMPLE(IDX) \
+   (db_##IDX##_store,          int(int64_t,int64_t,int64_t,int64_t,int))\
+   (db_##IDX##_remove,         void(int))\
+   (db_##IDX##_update,         void(int,int64_t,int))\
+   (db_##IDX##_find_primary,   int(int64_t,int64_t,int64_t,int,int64_t))\
+   (db_##IDX##_find_secondary, int(int64_t,int64_t,int64_t,int,int))\
+   (db_##IDX##_lowerbound,     int(int64_t,int64_t,int64_t,int,int))\
+   (db_##IDX##_upperbound,     int(int64_t,int64_t,int64_t,int,int))\
+   (db_##IDX##_end,            int(int64_t,int64_t,int64_t))\
+   (db_##IDX##_next,           int(int, int))\
+   (db_##IDX##_previous,       int(int, int))
+
+#define DB_SECONDARY_INDEX_METHODS_ARRAY(IDX) \
+      (db_##IDX##_store,          int(int64_t,int64_t,int64_t,int64_t,int,int))\
+      (db_##IDX##_remove,         void(int))\
+      (db_##IDX##_update,         void(int,int64_t,int,int))\
+      (db_##IDX##_find_primary,   int(int64_t,int64_t,int64_t,int,int,int64_t))\
+      (db_##IDX##_find_secondary, int(int64_t,int64_t,int64_t,int,int,int))\
+      (db_##IDX##_lowerbound,     int(int64_t,int64_t,int64_t,int,int,int))\
+      (db_##IDX##_upperbound,     int(int64_t,int64_t,int64_t,int,int,int))\
+      (db_##IDX##_end,            int(int64_t,int64_t,int64_t))\
+      (db_##IDX##_next,           int(int, int))\
+      (db_##IDX##_previous,       int(int, int))
+
+REGISTER_INTRINSICS( database_api,
+   (db_store_i64,        int(int64_t,int64_t,int64_t,int64_t,int,int))
+   (db_update_i64,       void(int,int64_t,int,int))
+   (db_remove_i64,       void(int))
+   (db_get_i64,          int(int, int, int))
+   (db_next_i64,         int(int, int))
+   (db_previous_i64,     int(int, int))
+   (db_find_i64,         int(int64_t,int64_t,int64_t,int64_t))
+   (db_lowerbound_i64,   int(int64_t,int64_t,int64_t,int64_t))
+   (db_upperbound_i64,   int(int64_t,int64_t,int64_t,int64_t))
+   (db_end_i64,          int(int64_t,int64_t,int64_t))
+
+   DB_SECONDARY_INDEX_METHODS_SIMPLE(idx64)
+   DB_SECONDARY_INDEX_METHODS_SIMPLE(idx128)
+   DB_SECONDARY_INDEX_METHODS_ARRAY(idx256)
+   DB_SECONDARY_INDEX_METHODS_SIMPLE(idx_double)
+   DB_SECONDARY_INDEX_METHODS_SIMPLE(idx_long_double)
+);
+
+REGISTER_INTRINSICS(crypto_api,
+   (assert_recover_key,     void(int, int, int, int, int) )
+   (recover_key,            int(int, int, int, int, int)  )
+   (assert_sha256,          void(int, int, int)           )
+   (assert_sha1,            void(int, int, int)           )
+   (assert_sha512,          void(int, int, int)           )
+   (assert_ripemd160,       void(int, int, int)           )
+   (sha1,                   void(int, int, int)           )
+   (sha256,                 void(int, int, int)           )
+   (sha512,                 void(int, int, int)           )
+   (ripemd160,              void(int, int, int)           )
+);
+
+
+REGISTER_INTRINSICS(permission_api,
+   (check_transaction_authorization, int(int, int, int, int, int, int)                  )
+   (check_permission_authorization,  int(int64_t, int64_t, int, int, int, int, int64_t) )
+   (get_permission_last_used,        int64_t(int64_t, int64_t) )
+   (get_account_creation_time,       int64_t(int64_t) )
+);
+
+
+REGISTER_INTRINSICS(system_api,
+   (current_time, int64_t()       )
+   (publication_time,   int64_t() )
+);
+
+REGISTER_INTRINSICS(context_free_system_api,
+   (abort,                void()              )
+   (eosio_assert,         void(int, int)      )
+   (eosio_assert_message, void(int, int, int) )
+   (eosio_assert_code,    void(int, int64_t)  )
+   (eosio_exit,           void(int)           )
+);
+
+REGISTER_INTRINSICS(action_api,
+   (read_action_data,       int(int, int)  )
+   (action_data_size,       int()          )
+   (current_receiver,   int64_t()          )
+);
+
+REGISTER_INTRINSICS(authorization_api,
+   (require_recipient,     void(int64_t)          )
+   (require_authorization, void(int64_t), "require_auth", void(authorization_api::*)(const account_name&) )
+   (require_authorization, void(int64_t, int64_t), "require_auth2", void(authorization_api::*)(const account_name&, const permission_name& permission) )
+   (has_authorization,     int(int64_t), "has_auth", bool(authorization_api::*)(const account_name&)const )
+   (is_account,            int(int64_t)           )
+);
+
+REGISTER_INTRINSICS(console_api,
+   (prints,                void(int)      )
+   (prints_l,              void(int, int) )
+   (printi,                void(int64_t)  )
+   (printui,               void(int64_t)  )
+   (printi128,             void(int)      )
+   (printui128,            void(int)      )
+   (printsf,               void(float)    )
+   (printdf,               void(double)   )
+   (printqf,               void(int)      )
+   (printn,                void(int64_t)  )
+   (printhex,              void(int, int) )
+);
+
+REGISTER_INTRINSICS(context_free_transaction_api,
+   (read_transaction,       int(int, int)            )
+   (transaction_size,       int()                    )
+   (expiration,             int()                    )
+   (tapos_block_prefix,     int()                    )
+   (tapos_block_num,        int()                    )
+   (get_action,             int (int, int, int, int) )
+);
+
+REGISTER_INTRINSICS(transaction_api,
+   (send_inline,               void(int, int)               )
+   (send_context_free_inline,  void(int, int)               )
+   (send_deferred,             void(int, int64_t, int, int, int32_t) )
+   (cancel_deferred,           int(int)                     )
+);
+
+REGISTER_INTRINSICS(context_free_api,
+   (get_context_free_data, int(int, int, int) )
+)
+
+REGISTER_INTRINSICS(memory_api,
+   (memcpy,                 int(int, int, int)  )
+   (memmove,                int(int, int, int)  )
+   (memcmp,                 int(int, int, int)  )
+   (memset,                 int(int, int, int)  )
+);
+
+REGISTER_INJECTED_INTRINSICS(softfloat_api,
+      (_eosio_f32_add,       float(float, float)    )
+      (_eosio_f32_sub,       float(float, float)    )
+      (_eosio_f32_mul,       float(float, float)    )
+      (_eosio_f32_div,       float(float, float)    )
+      (_eosio_f32_min,       float(float, float)    )
+      (_eosio_f32_max,       float(float, float)    )
+      (_eosio_f32_copysign,  float(float, float)    )
+      (_eosio_f32_abs,       float(float)           )
+      (_eosio_f32_neg,       float(float)           )
+      (_eosio_f32_sqrt,      float(float)           )
+      (_eosio_f32_ceil,      float(float)           )
+      (_eosio_f32_floor,     float(float)           )
+      (_eosio_f32_trunc,     float(float)           )
+      (_eosio_f32_nearest,   float(float)           )
+      (_eosio_f32_eq,        int(float, float)      )
+      (_eosio_f32_ne,        int(float, float)      )
+      (_eosio_f32_lt,        int(float, float)      )
+      (_eosio_f32_le,        int(float, float)      )
+      (_eosio_f32_gt,        int(float, float)      )
+      (_eosio_f32_ge,        int(float, float)      )
+      (_eosio_f64_add,       double(double, double) )
+      (_eosio_f64_sub,       double(double, double) )
+      (_eosio_f64_mul,       double(double, double) )
+      (_eosio_f64_div,       double(double, double) )
+      (_eosio_f64_min,       double(double, double) )
+      (_eosio_f64_max,       double(double, double) )
+      (_eosio_f64_copysign,  double(double, double) )
+      (_eosio_f64_abs,       double(double)         )
+      (_eosio_f64_neg,       double(double)         )
+      (_eosio_f64_sqrt,      double(double)         )
+      (_eosio_f64_ceil,      double(double)         )
+      (_eosio_f64_floor,     double(double)         )
+      (_eosio_f64_trunc,     double(double)         )
+      (_eosio_f64_nearest,   double(double)         )
+      (_eosio_f64_eq,        int(double, double)    )
+      (_eosio_f64_ne,        int(double, double)    )
+      (_eosio_f64_lt,        int(double, double)    )
+      (_eosio_f64_le,        int(double, double)    )
+      (_eosio_f64_gt,        int(double, double)    )
+      (_eosio_f64_ge,        int(double, double)    )
+      (_eosio_f32_promote,    double(float)         )
+      (_eosio_f64_demote,     float(double)         )
+      (_eosio_f32_trunc_i32s, int(float)            )
+      (_eosio_f64_trunc_i32s, int(double)           )
+      (_eosio_f32_trunc_i32u, int(float)            )
+      (_eosio_f64_trunc_i32u, int(double)           )
+      (_eosio_f32_trunc_i64s, int64_t(float)        )
+      (_eosio_f64_trunc_i64s, int64_t(double)       )
+      (_eosio_f32_trunc_i64u, int64_t(float)        )
+      (_eosio_f64_trunc_i64u, int64_t(double)       )
+      (_eosio_i32_to_f32,     float(int32_t)        )
+      (_eosio_i64_to_f32,     float(int64_t)        )
+      (_eosio_ui32_to_f32,    float(int32_t)        )
+      (_eosio_ui64_to_f32,    float(int64_t)        )
+      (_eosio_i32_to_f64,     double(int32_t)       )
+      (_eosio_i64_to_f64,     double(int64_t)       )
+      (_eosio_ui32_to_f64,    double(int32_t)       )
+      (_eosio_ui64_to_f64,    double(int64_t)       )
+);
+
+std::istream& operator>>(std::istream& in, wasm_interface::vm_type& runtime) {
+   std::string s;
+   in >> s;
+   if (s == "wavm")
+      runtime = eosio::chain::wasm_interface::vm_type::wavm;
+   else if (s == "binaryen")
+      runtime = eosio::chain::wasm_interface::vm_type::binaryen;
+   else
+      in.setstate(std::ios_base::failbit);
+   return in;
+}
+
+} } /// eosio::chain

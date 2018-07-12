@@ -13,7 +13,7 @@ namespace WAST
 {
 	const char* describeToken(TokenType tokenType)
 	{
-		assert(tokenType < numTokenTypes);
+		WAVM_ASSERT_THROW(tokenType < numTokenTypes);
 		static const char* tokenDescriptions[] =
 		{
 			// This ENUM_TOKENS must come before the literalTokenPairs definition that redefines VISIT_OPERATOR_TOKEN.
@@ -66,16 +66,16 @@ namespace WAST
 	{
 		static const std::pair<TokenType,const char*> regexpTokenPairs[] =
 		{
-			{t_decimalInt,"[+\\-]?\\d+"},
-			{t_decimalFloat,"[+\\-]?\\d+\\.\\d*([eE][+\\-]?\\d+)?"},
-			{t_decimalFloat,"[+\\-]?\\d+[eE][+\\-]?\\d+"},
+			{t_decimalInt,"[+\\-]?\\d+(_\\d+)*"},
+			{t_decimalFloat,"[+\\-]?\\d+(_\\d+)*\\.(\\d+(_\\d+)*)*([eE][+\\-]?\\d+(_\\d+)*)?"},
+			{t_decimalFloat,"[+\\-]?\\d+(_\\d+)*[eE][+\\-]?\\d+(_\\d+)*"},
 
-			{t_hexInt,"[+\\-]?0[xX][\\da-fA-F]+"},
-			{t_hexFloat,"[+\\-]?0[xX][\\da-fA-F]+\\.[\\da-fA-F]*([pP][+\\-]?\\d+)?"},
-			{t_hexFloat,"[+\\-]?0[xX][\\da-fA-F]+[pP][+\\-]?\\d+"},
+			{t_hexInt,"[+\\-]?0[xX][\\da-fA-F]+(_[\\da-fA-F]+)*"},
+			{t_hexFloat,"[+\\-]?0[xX][\\da-fA-F]+(_[\\da-fA-F]+)*\\.([\\da-fA-F]+(_[\\da-fA-F]+)*)*([pP][+\\-]?\\d+(_\\d+)*)?"},
+			{t_hexFloat,"[+\\-]?0[xX][\\da-fA-F]+(_[\\da-fA-F]+)*[pP][+\\-]?\\d+(_\\d+)*"},
 
-			{t_floatNaN,"[+\\-]?nan(:0[xX][\\da-fA-F]+)?"},
-			{t_floatInf,"[+\\-]?inf(inity)?"},
+			{t_floatNaN,"[+\\-]?nan(:0[xX][\\da-fA-F]+(_[\\da-fA-F]+)*)?"},
+			{t_floatInf,"[+\\-]?inf"},
 
 			{t_string,"\"([^\"\n\\\\]*(\\\\([^0-9a-fA-Fu]|[0-9a-fA-F][0-9a-fA-F]|u\\{[0-9a-fA-F]+})))*\""},
 

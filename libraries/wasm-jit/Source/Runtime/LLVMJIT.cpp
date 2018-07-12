@@ -3,6 +3,7 @@
 #include "Inline/Timing.h"
 #include "Logging/Logging.h"
 #include "RuntimePrivate.h"
+#include "IR/Validate.h"
 
 #ifdef _DEBUG
 	// This needs to be 1 to allow debuggers such as Visual Studio to place breakpoints and step through the JITed code.
@@ -11,11 +12,17 @@
 	#define DUMP_UNOPTIMIZED_MODULE 1
 	#define VERIFY_MODULE 1
 	#define DUMP_OPTIMIZED_MODULE 1
+	#define PRINT_DISASSEMBLY 0
 #else
 	#define USE_WRITEABLE_JIT_CODE_PAGES 0
 	#define DUMP_UNOPTIMIZED_MODULE 0
 	#define VERIFY_MODULE 0
 	#define DUMP_OPTIMIZED_MODULE 0
+	#define PRINT_DISASSEMBLY 0
+#endif
+
+#if PRINT_DISASSEMBLY
+#include "llvm-c/Disassembler.h"
 #endif
 
 namespace LLVMJIT
@@ -41,10 +48,6 @@ namespace LLVMJIT
 	llvm::Type* llvmI64x2Type;
 	llvm::Type* llvmF32x4Type;
 	llvm::Type* llvmF64x2Type;
-	llvm::Type* llvmB8x16Type;
-	llvm::Type* llvmB16x8Type;
-	llvm::Type* llvmB32x4Type;
-	llvm::Type* llvmB64x2Type;
 	#endif
 
 	llvm::Constant* typedZeroConstants[(Uptr)ValueType::num];
@@ -86,6 +89,7 @@ namespace LLVMJIT
 	{
 		UnitMemoryManager()
 		: imageBaseAddress(nullptr)
+		, numAllocatedImagePages(0)
 		, isFinalized(false)
 		, codeSection({0})
 		, readOnlySection({0})
@@ -98,11 +102,12 @@ namespace LLVMJIT
 			if(hasRegisteredEHFrames)
 			{
 				hasRegisteredEHFrames = false;
-				deregisterEHFrames(ehFramesAddr,ehFramesLoadAddr,ehFramesNumBytes);
+            llvm::RTDyldMemoryManager::deregisterEHFrames(ehFramesAddr,ehFramesLoadAddr,ehFramesNumBytes);
 			}
 
 			// Decommit the image pages, but leave them reserved to catch any references to them that might erroneously remain.
-			Platform::decommitVirtualPages(imageBaseAddress,numAllocatedImagePages);
+			if(numAllocatedImagePages)
+				Platform::decommitVirtualPages(imageBaseAddress,numAllocatedImagePages);
 		}
 		
 		void registerEHFrames(U8* addr, U64 loadAddr,uintptr_t numBytes) override
@@ -121,6 +126,8 @@ namespace LLVMJIT
 		virtual bool needsToReserveAllocationSpace() override { return true; }
 		virtual void reserveAllocationSpace(uintptr_t numCodeBytes,U32 codeAlignment,uintptr_t numReadOnlyBytes,U32 readOnlyAlignment,uintptr_t numReadWriteBytes,U32 readWriteAlignment) override
 		{
+			if(numReadWriteBytes)
+				 Runtime::causeException(Exception::Cause::outOfMemory);
 			// Calculate the number of pages to be used by each section.
 			codeSection.numPages = shrAndRoundUp(numCodeBytes,Platform::getPageSizeLog2());
 			readOnlySection.numPages = shrAndRoundUp(numReadOnlyBytes,Platform::getPageSizeLog2());
@@ -146,7 +153,7 @@ namespace LLVMJIT
 		}
 		virtual bool finalizeMemory(std::string* ErrMsg = nullptr) override
 		{
-			assert(!isFinalized);
+			WAVM_ASSERT_THROW(!isFinalized);
 			isFinalized = true;
 			// Set the requested final memory access for each section's pages.
 			const Platform::MemoryAccess codeAccess = USE_WRITEABLE_JIT_CODE_PAGES ? Platform::MemoryAccess::ReadWriteExecute : Platform::MemoryAccess::Execute;
@@ -186,13 +193,13 @@ namespace LLVMJIT
 
 		U8* allocateBytes(Uptr numBytes,Uptr alignment,Section& section)
 		{
-			assert(section.baseAddress);
-			assert(!(alignment & (alignment - 1)));
-			assert(!isFinalized);
+			WAVM_ASSERT_THROW(section.baseAddress);
+			WAVM_ASSERT_THROW(!(alignment & (alignment - 1)));
+			WAVM_ASSERT_THROW(!isFinalized);
 			
 			// Allocate the section at the lowest uncommitted byte of image memory.
 			U8* allocationBaseAddress = section.baseAddress + align(section.numCommittedBytes,alignment);
-			assert(!(reinterpret_cast<Uptr>(allocationBaseAddress) & (alignment-1)));
+			WAVM_ASSERT_THROW(!(reinterpret_cast<Uptr>(allocationBaseAddress) & (alignment-1)));
 			section.numCommittedBytes = align(section.numCommittedBytes,alignment) + align(numBytes,alignment);
 
 			// Check that enough space was reserved in the section.
@@ -224,8 +231,9 @@ namespace LLVMJIT
 		}
 		~JITUnit()
 		{
-			compileLayer->removeModuleSet(handle);
-			#ifdef _WIN32
+			if(handleIsValid)
+				compileLayer->removeModuleSet(handle);
+			#ifdef _WIN64
 				if(pdataCopy) { Platform::deregisterSEHUnwindInfo(reinterpret_cast<Uptr>(pdataCopy)); }
 			#endif
 		}
@@ -262,6 +270,7 @@ namespace LLVMJIT
 		std::unique_ptr<ObjectLayer> objectLayer;
 		std::unique_ptr<CompileLayer> compileLayer;
 		CompileLayer::ModuleSetHandleT handle;
+		bool handleIsValid = false;
 		bool shouldLogMetrics;
 
 		struct LoadedObject
@@ -302,8 +311,8 @@ namespace LLVMJIT
 			Uptr functionDefIndex;
 			if(getFunctionIndexFromExternalName(name,functionDefIndex))
 			{
-				assert(moduleInstance);
-				assert(functionDefIndex < moduleInstance->functionDefs.size());
+				WAVM_ASSERT_THROW(moduleInstance);
+				WAVM_ASSERT_THROW(functionDefIndex < moduleInstance->functionDefs.size());
 				FunctionInstance* functionInstance = moduleInstance->functionDefs[functionDefIndex];
 				auto symbol = new JITSymbol(functionInstance,baseAddress,numBytes,std::move(offsetToOpIndexMap));
 				functionDefSymbols.push_back(symbol);
@@ -328,7 +337,11 @@ namespace LLVMJIT
 
 		void notifySymbolLoaded(const char* name,Uptr baseAddress,Uptr numBytes,std::map<U32,U32>&& offsetToOpIndexMap) override
 		{
-			assert(!strcmp(name,"invokeThunk"));
+			#if defined(_WIN32) && !defined(_WIN64)
+				WAVM_ASSERT_THROW(!strcmp(name,"_invokeThunk"));
+			#else
+				WAVM_ASSERT_THROW(!strcmp(name,"invokeThunk"));
+			#endif
 			symbol = new JITSymbol(functionType,baseAddress,numBytes,std::move(offsetToOpIndexMap));
 		}
 	};
@@ -341,18 +354,43 @@ namespace LLVMJIT
 		virtual llvm::JITSymbol findSymbolInLogicalDylib(const std::string& name) override;
 	};
 	
+	static std::map<std::string,const char*> runtimeSymbolMap =
+	{
+		#ifdef _WIN32
+			// the LLVM X86 code generator calls __chkstk when allocating more than 4KB of stack space
+			{"__chkstk","__chkstk"},
+			#ifndef _WIN64
+			{"__aullrem","_aullrem"},
+			{"__allrem","_allrem"},
+			{"__aulldiv","_aulldiv"},
+			{"__alldiv","_alldiv"},
+			#endif
+		#endif
+		#ifdef __arm__
+		{"__aeabi_uidiv","__aeabi_uidiv"},
+		{"__aeabi_idiv","__aeabi_idiv"},
+		{"__aeabi_idivmod","__aeabi_idivmod"},
+		{"__aeabi_uldiv","__aeabi_uldiv"},
+		{"__aeabi_uldivmod","__aeabi_uldivmod"},
+		{"__aeabi_unwind_cpp_pr0","__aeabi_unwind_cpp_pr0"},
+		{"__aeabi_unwind_cpp_pr1","__aeabi_unwind_cpp_pr1"},
+		#endif
+	};
+
 	NullResolver NullResolver::singleton;
 	llvm::JITSymbol NullResolver::findSymbol(const std::string& name)
 	{
-		// Allow __chkstk through: the LLVM X86 code generator adds calls to it when allocating more than 4KB of stack space.
-		if(name == "__chkstk")
+		// Allow some intrinsics used by LLVM
+		auto runtimeSymbolNameIt = runtimeSymbolMap.find(name);
+		if(runtimeSymbolNameIt != runtimeSymbolMap.end())
 		{
-			void *addr = llvm::sys::DynamicLibrary::SearchForAddressOfSymbol(name);
-			if (addr) { return llvm::JITSymbol(reinterpret_cast<Uptr>(addr),llvm::JITSymbolFlags::None); }
+			const char* lookupName = runtimeSymbolNameIt->second;
+			void *addr = llvm::sys::DynamicLibrary::SearchForAddressOfSymbol(lookupName);
+			if(!addr) { Errors::fatalf("LLVM generated code references undefined external symbol: %s\n",lookupName); }
+			return llvm::JITSymbol(reinterpret_cast<Uptr>(addr),llvm::JITSymbolFlags::None);
 		}
 
-		Log::printf(Log::Category::error,"LLVM generated code referenced external symbol: %s\n",name.c_str());
-		Errors::unreachable();
+		Errors::fatalf("LLVM generated code references disallowed external symbol: %s\n",name.c_str());
 	}
 	llvm::JITSymbol NullResolver::findSymbolInLogicalDylib(const std::string& name) { return llvm::JITSymbol(nullptr); }
 
@@ -362,7 +400,7 @@ namespace LLVMJIT
 		const std::vector<std::unique_ptr<llvm::RuntimeDyld::LoadedObjectInfo>>& loadedObjects
 		)
 	{
-		assert(objectSet.size() == loadedObjects.size());
+		WAVM_ASSERT_THROW(objectSet.size() == loadedObjects.size());
 		for(Uptr objectIndex = 0;objectIndex < loadedObjects.size();++objectIndex)
 		{
 			llvm::object::ObjectFile* object = objectSet[objectIndex].get()->getBinary();
@@ -371,7 +409,7 @@ namespace LLVMJIT
 			// Make a copy of the loaded object info for use by the finalizer.
 			jitUnit->loadedObjects.push_back({object,loadedObject});
 
-			#ifdef _WIN32
+			#ifdef _WIN64
 				// On Windows, look for .pdata and .xdata sections containing information about how to unwind the stack.
 				// This needs to be done before the below emitAndFinalize call, which will incorrectly apply relocations to the unwind info.
 				
@@ -423,6 +461,36 @@ namespace LLVMJIT
 
 	}
 
+	#if PRINT_DISASSEMBLY
+	void disassembleFunction(U8* bytes,Uptr numBytes)
+	{
+		LLVMDisasmContextRef disasmRef = LLVMCreateDisasm(llvm::sys::getProcessTriple().c_str(),nullptr,0,nullptr,nullptr);
+
+		U8* nextByte = bytes;
+		Uptr numBytesRemaining = numBytes;
+		while(numBytesRemaining)
+		{
+			char instructionBuffer[256];
+			const Uptr numInstructionBytes = LLVMDisasmInstruction(
+				disasmRef,
+				nextByte,
+				numBytesRemaining,
+				reinterpret_cast<Uptr>(nextByte),
+				instructionBuffer,
+				sizeof(instructionBuffer)
+				);
+			WAVM_ASSERT_THROW(numInstructionBytes > 0);
+			WAVM_ASSERT_THROW(numInstructionBytes <= numBytesRemaining);
+			numBytesRemaining -= numInstructionBytes;
+			nextByte += numInstructionBytes;
+
+			Log::printf(Log::Category::debug,"\t\t%s\n",instructionBuffer);
+		};
+
+		LLVMDisasmDispose(disasmRef);
+	}
+	#endif
+
 	void JITUnit::NotifyFinalizedFunctor::operator()(const llvm::orc::ObjectLinkingLayerBase::ObjSetHandleT& objectSetHandle)
 	{
 		for(Uptr objectIndex = 0;objectIndex < jitUnit->loadedObjects.size();++objectIndex)
@@ -444,7 +512,8 @@ namespace LLVMJIT
 				&&	address)
 				{
 					// Compute the address the functions was loaded at.
-					Uptr loadedAddress = *address;
+					WAVM_ASSERT_THROW(*address <= UINTPTR_MAX);
+					Uptr loadedAddress = Uptr(*address);
 					auto symbolSection = symbol.getSection();
 					if(symbolSection)
 					{
@@ -455,9 +524,19 @@ namespace LLVMJIT
 					llvm::DILineInfoTable lineInfoTable = dwarfContext->getLineInfoForAddressRange(loadedAddress,symbolSizePair.second);
 					std::map<U32,U32> offsetToOpIndexMap;
 					for(auto lineInfo : lineInfoTable) { offsetToOpIndexMap.emplace(U32(lineInfo.first - loadedAddress),lineInfo.second.Line); }
+					
+					#if PRINT_DISASSEMBLY
+					Log::printf(Log::Category::error,"Disassembly for function %s\n",name.get().data());
+					disassembleFunction(reinterpret_cast<U8*>(loadedAddress),Uptr(symbolSizePair.second));
+					#endif
 
 					// Notify the JIT unit that the symbol was loaded.
-					jitUnit->notifySymbolLoaded(name->data(),loadedAddress,symbolSizePair.second,std::move(offsetToOpIndexMap));
+					WAVM_ASSERT_THROW(symbolSizePair.second <= UINTPTR_MAX);
+					jitUnit->notifySymbolLoaded(
+						name->data(),loadedAddress,
+						Uptr(symbolSizePair.second),
+						std::move(offsetToOpIndexMap)
+						);
 				}
 			}
 		}
@@ -502,6 +581,7 @@ namespace LLVMJIT
 		fpm->add(llvm::createJumpThreadingPass());
 		fpm->add(llvm::createConstantPropagationPass());
 		fpm->doInitialization();
+
 		for(auto functionIt = llvmModule->begin();functionIt != llvmModule->end();++functionIt)
 		{ fpm->run(*functionIt); }
 		delete fpm;
@@ -519,13 +599,14 @@ namespace LLVMJIT
 			std::vector<llvm::Module*>{llvmModule},
 			&memoryManager,
 			&NullResolver::singleton);
+		handleIsValid = true;
 		compileLayer->emitAndFinalize(handle);
 
 		if(shouldLogMetrics)
 		{
 			Timing::logRatePerSecond("Generated machine code",machineCodeTimer,(F64)llvmModule->size(),"functions");
 		}
-		
+
 		delete llvmModule;
 	}
 
@@ -544,17 +625,25 @@ namespace LLVMJIT
 
 	std::string getExternalFunctionName(ModuleInstance* moduleInstance,Uptr functionDefIndex)
 	{
-		assert(functionDefIndex < moduleInstance->functionDefs.size());
+		WAVM_ASSERT_THROW(functionDefIndex < moduleInstance->functionDefs.size());
 		return "wasmFunc" + std::to_string(functionDefIndex)
 			+ "_" + moduleInstance->functionDefs[functionDefIndex]->debugName;
 	}
 
 	bool getFunctionIndexFromExternalName(const char* externalName,Uptr& outFunctionDefIndex)
 	{
-		if(!strncmp(externalName,"wasmFunc",8))
+		#if defined(_WIN32) && !defined(_WIN64)
+			const char wasmFuncPrefix[] = "_wasmFunc";
+		#else
+			const char wasmFuncPrefix[] = "wasmFunc";
+		#endif
+		const Uptr numPrefixChars = sizeof(wasmFuncPrefix) - 1;
+		if(!strncmp(externalName,wasmFuncPrefix,numPrefixChars))
 		{
 			char* numberEnd = nullptr;
-			outFunctionDefIndex = std::strtoull(externalName + 8,&numberEnd,10);
+			U64 functionDefIndex64 = std::strtoull(externalName + numPrefixChars,&numberEnd,10);
+			if(functionDefIndex64 > UINTPTR_MAX) { return false; }
+			outFunctionDefIndex = Uptr(functionDefIndex64);
 			return true;
 		}
 		else { return false; }
@@ -647,7 +736,7 @@ namespace LLVMJIT
 		auto jitUnit = new JITInvokeThunkUnit(functionType);
 		jitUnit->compile(llvmModule);
 
-		assert(jitUnit->symbol);
+		WAVM_ASSERT_THROW(jitUnit->symbol);
 		invokeThunkTypeToSymbolMap[functionType] = jitUnit->symbol;
 
 		{
@@ -657,12 +746,13 @@ namespace LLVMJIT
 
 		return reinterpret_cast<InvokeFunctionPointer>(jitUnit->symbol->baseAddress);
 	}
-	
+
 	void init()
 	{
 		llvm::InitializeNativeTarget();
 		llvm::InitializeNativeTargetAsmPrinter();
 		llvm::InitializeNativeTargetAsmParser();
+		llvm::InitializeNativeTargetDisassembler();
 		llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
 
 		auto targetTriple = llvm::sys::getProcessTriple();
@@ -671,7 +761,15 @@ namespace LLVMJIT
 			// our symbols can't be found in the JITed object file.
 			targetTriple += "-elf";
 		#endif
-		targetMachine = llvm::EngineBuilder().selectTarget(llvm::Triple(targetTriple),"","",llvm::SmallVector<std::string,0>());
+		targetMachine = llvm::EngineBuilder().selectTarget(
+			llvm::Triple(targetTriple),"","",
+			#if defined(_WIN32) && !defined(_WIN64)
+				// Use SSE2 instead of the FPU on x86 for more control over how intermediate results are rounded.
+				llvm::SmallVector<std::string,1>({"+sse2"})
+			#else
+				llvm::SmallVector<std::string,0>()
+			#endif
+			);
 
 		llvmI8Type = llvm::Type::getInt8Ty(context);
 		llvmI16Type = llvm::Type::getInt16Ty(context);
@@ -690,10 +788,6 @@ namespace LLVMJIT
 		llvmI64x2Type = llvm::VectorType::get(llvmI64Type,2);
 		llvmF32x4Type = llvm::VectorType::get(llvmF32Type,4);
 		llvmF64x2Type = llvm::VectorType::get(llvmF64Type,2);
-		llvmB8x16Type = llvm::VectorType::get(llvmBoolType,16);
-		llvmB16x8Type = llvm::VectorType::get(llvmBoolType,8);
-		llvmB32x4Type = llvm::VectorType::get(llvmBoolType,4);
-		llvmB64x2Type = llvm::VectorType::get(llvmBoolType,2);
 		#endif
 
 		llvmResultTypes[(Uptr)ResultType::none] = llvm::Type::getVoidTy(context);

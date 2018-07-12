@@ -1,4 +1,3 @@
-file(GLOB COMMON_SOURCES "common/*.cpp")
 
 find_package( Gperftools QUIET )
 if( GPERFTOOLS_FOUND )
@@ -12,42 +11,90 @@ link_directories(${LLVM_LIBRARY_DIR})
 
 set( CMAKE_CXX_STANDARD 14 )
 
-file(GLOB UNIT_TESTS "tests/*.cpp")
-if(WASM_TOOLCHAIN)
-  add_subdirectory(tests/contracts/rate_limit_auth)
-  file(GLOB WASM_UNIT_TESTS "tests/wasm_tests/*.cpp")
-  list(APPEND UNIT_TESTS ${WASM_UNIT_TESTS})
-endif()
-add_executable( chain_test ${UNIT_TESTS} ${COMMON_SOURCES} )
-target_link_libraries( chain_test eos_native_contract eos_chain chainbase eos_utilities eos_egenesis_none wallet_plugin chain_plugin producer_plugin fc abi_generator ${PLATFORM_SPECIFIC_LIBS} )
-if(WASM_TOOLCHAIN)
-  target_include_directories( chain_test PUBLIC ${CMAKE_BINARY_DIR}/contracts ${CMAKE_CURRENT_BINARY_DIR}/tests/contracts )
-  add_dependencies(chain_test rate_limit_auth)
-endif()
+include_directories("${CMAKE_SOURCE_DIR}/plugins/wallet_plugin/include")
 
-# WASM only tests
-if(WASM_TOOLCHAIN)
-  file(GLOB SLOW_TESTS "slow_tests/*.cpp")
-  add_executable( slow_test ${SLOW_TESTS} ${COMMON_SOURCES} )
-  target_link_libraries( slow_test eos_native_contract eos_chain chainbase eos_utilities eos_egenesis_none chain_plugin producer_plugin fc ${PLATFORM_SPECIFIC_LIBS} )
-  target_include_directories( slow_test PUBLIC ${CMAKE_BINARY_DIR}/contracts )
-  add_dependencies(slow_test currency exchange)
+file(GLOB UNIT_TESTS "wallet_tests.cpp")
 
-  add_subdirectory(api_tests/memory_test)
-  add_subdirectory(api_tests/extended_memory_test)
-  add_subdirectory(api_tests/table_abi_test)
-  file(GLOB API_TESTS "api_tests/*.cpp")
-  add_executable( api_test ${API_TESTS} ${COMMON_SOURCES} )
-  target_link_libraries( api_test eos_native_contract eos_chain chainbase eos_utilities eos_egenesis_none chain_plugin producer_plugin fc ${PLATFORM_SPECIFIC_LIBS} )
-  target_include_directories( api_test PUBLIC ${CMAKE_BINARY_DIR}/contracts ${CMAKE_SOURCE_DIR}/contracts ${CMAKE_CURRENT_BINARY_DIR}/api_tests )
-  add_dependencies(api_test test_api memory_test extended_memory_test table_abi_test)
-endif()
+add_executable( plugin_test ${UNIT_TESTS} ${WASM_UNIT_TESTS} main.cpp)
+target_link_libraries( plugin_test eosio_testing eosio_chain chainbase eos_utilities chain_plugin wallet_plugin abi_generator fc ${PLATFORM_SPECIFIC_LIBS} )
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/eosd_run_test.sh ${CMAKE_CURRENT_BINARY_DIR}/eosd_run_test.sh COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/eosd_run_mongodb_test.sh ${CMAKE_CURRENT_BINARY_DIR}/eosd_run_mongodb_test.sh COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/p2p_tests/sync/test.sh ${CMAKE_CURRENT_BINARY_DIR}/p2p_tests/sync/test.sh COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run_tests.sh ${CMAKE_CURRENT_BINARY_DIR}/run_tests.sh COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/trans_sync_across_mixed_cluster_test.sh ${CMAKE_CURRENT_BINARY_DIR}/trans_sync_across_mixed_cluster_test.sh COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/distributed-transactions-test.py ${CMAKE_CURRENT_BINARY_DIR}/distributed-transactions-test.py COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/restart-scenarios-test.py ${CMAKE_CURRENT_BINARY_DIR}/restart-scenarios-test.py COPYONLY)
+target_include_directories( plugin_test PUBLIC ${CMAKE_SOURCE_DIR}/plugins/net_plugin/include )
+add_dependencies(plugin_test asserter test_api test_api_mem test_api_db test_api_multi_index exchange proxy identity identity_test stltest infinite eosio.system eosio.token eosio.bios test.inline multi_index_test noop dice eosio.msig)
+
+#
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/core_symbol.py.in ${CMAKE_CURRENT_BINARY_DIR}/core_symbol.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/testUtils.py ${CMAKE_CURRENT_BINARY_DIR}/testUtils.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/TestHelper.py ${CMAKE_CURRENT_BINARY_DIR}/TestHelper.py COPYONLY)
+
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/p2p_tests/dawn_515/test.sh ${CMAKE_CURRENT_BINARY_DIR}/p2p_tests/dawn_515/test.sh COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/distributed-transactions-test.py ${CMAKE_CURRENT_BINARY_DIR}/distributed-transactions-test.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/distributed-transactions-remote-test.py ${CMAKE_CURRENT_BINARY_DIR}/distributed-transactions-remote-test.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/sample-cluster-map.json ${CMAKE_CURRENT_BINARY_DIR}/sample-cluster-map.json COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/restart-scenarios-test.py ${CMAKE_CURRENT_BINARY_DIR}/restart-scenarios-test.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/nodeos_run_test.py ${CMAKE_CURRENT_BINARY_DIR}/nodeos_run_test.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/nodeos_run_remote_test.py ${CMAKE_CURRENT_BINARY_DIR}/nodeos_run_remote_test.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/consensus-validation-malicious-producers.py ${CMAKE_CURRENT_BINARY_DIR}/consensus-validation-malicious-producers.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/validate-dirty-db.py ${CMAKE_CURRENT_BINARY_DIR}/validate-dirty-db.py COPYONLY)
+
+#To run plugin_test with all log from blockchain displayed, put --verbose after --, i.e. plugin_test -- --verbose
+add_test(NAME plugin_test COMMAND plugin_test --report_level=detailed --color_output)
+
+add_test(NAME nodeos_run_test COMMAND tests/nodeos_run_test.py -v --clean-run --dump-error-detail WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_test(NAME p2p_dawn515_test COMMAND tests/p2p_tests/dawn_515/test.sh WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+#if(BUILD_MONGO_DB_PLUGIN)
+#   add_test(NAME nodeos_run_test-mongodb COMMAND tests/nodeos_run_test.py --mongodb -v --dump-error-detail WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+#endif()
+
+# TODO: Tests removed until working again on master.
+add_test(NAME distributed-transactions-test COMMAND tests/distributed-transactions-test.py -d 2 -p 1 -n 4 -v --clean-run --dump-error-detail WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME restart-scenarios-test-resync COMMAND tests/restart-scenarios-test.py -c resync -p4 -v --clean-run --dump-error-details WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME restart-scenarios-test-hard_replay COMMAND tests/restart-scenarios-test.py -c hardReplay -p4 -v --clean-run --dump-error-details WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME restart-scenarios-test-none COMMAND tests/restart-scenarios-test.py -c none --kill-sig term -p4 -v --clean-run --dump-error-details WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+# TODO: add_test(NAME consensus-validation-malicious-producers COMMAND tests/consensus-validation-malicious-producers.py -w 80 --dump-error-details WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME validate_dirty_db_test COMMAND tests/validate-dirty-db.py -v --clean-run --dump-error-detail WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+if(ENABLE_COVERAGE_TESTING)
+
+  set(Coverage_NAME ${PROJECT_NAME}_coverage)
+
+  if(NOT LCOV_PATH)
+    message(FATAL_ERROR "lcov not found! Aborting...")
+  endif() # NOT LCOV_PATH
+
+  if(NOT LLVMCOV_PATH)
+    message(FATAL_ERROR "llvm-cov not found! Aborting...")
+  endif() # NOT LCOV_PATH
+
+  if(NOT GENHTML_PATH)
+    message(FATAL_ERROR "genhtml not found! Aborting...")
+  endif() # NOT GENHTML_PATH
+
+  # no spaces allowed within tests list
+  set(ctest_tests 'plugin_test|p2p_dawn515_test|nodeos_run_test|distributed-transactions-test|restart-scenarios-test_resync')
+  set(ctest_exclude_tests 'nodeos_run_remote_test|nodeos_run_test-mongodb|distributed-transactions-remote-test|restart-scenarios-test_replay')
+
+  # Setup target
+  add_custom_target(${Coverage_NAME}
+
+    COMMAND ${LCOV_PATH} --directory . --zerocounters
+
+    COMMAND ctest -R ${ctest_tests} -E ${ctest_exclude_tests}
+
+    COMMENT "Capturing lcov counters and generating report"
+    COMMAND ${LCOV_PATH} --directory . --capture --gcov-tool ./tools/llvm-gcov.sh --output-file ${Coverage_NAME}.info
+
+    COMMENT "Processing code coverage counters and generating report."
+    COMMAND ${GENHTML_PATH} -o ${Coverage_NAME} ${PROJECT_BINARY_DIR}/${Coverage_NAME}.info
+    COMMAND ${CMAKE_COMMAND} -E remove ${Coverage_NAME}.base ${Coverage_NAME}.info ${Coverage_NAME}.total ${PROJECT_BINARY_DIR}/${Coverage_NAME}.info.cleaned
+
+    WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+    COMMENT "Resetting code coverage counters to zero. Processing code coverage counters and generating report."
+    )
+
+  # Show info where to find the report
+  add_custom_command(TARGET ${Coverage_NAME} POST_BUILD
+    COMMAND ;
+    COMMENT "Open ./${Coverage_NAME}/index.html in your browser to view the coverage report."
+    )
+endif()

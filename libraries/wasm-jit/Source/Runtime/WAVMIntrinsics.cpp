@@ -123,7 +123,7 @@ namespace Runtime
 	DEFINE_INTRINSIC_FUNCTION1(wavmIntrinsics,floatToUnsignedInt,floatToUnsignedInt,i64,f32,source) { return floatToInt<U64,F32,true>(source,-1.0f,-2.0f * INT64_MIN); }
 	DEFINE_INTRINSIC_FUNCTION1(wavmIntrinsics,floatToUnsignedInt,floatToUnsignedInt,i64,f64,source) { return floatToInt<U64,F64,true>(source,-1.0,-2.0 * INT64_MIN); }
 
-	DEFINE_INTRINSIC_FUNCTION0(wavmIntrinsics,divideByZeroTrap,divideByZeroTrap,none)
+	DEFINE_INTRINSIC_FUNCTION0(wavmIntrinsics,divideByZeroOrIntegerOverflowTrap,divideByZeroOrIntegerOverflowTrap,none)
 	{
 		causeException(Exception::Cause::integerDivideByZeroOrIntegerOverflow);
 	}
@@ -131,6 +131,11 @@ namespace Runtime
 	DEFINE_INTRINSIC_FUNCTION0(wavmIntrinsics,unreachableTrap,unreachableTrap,none)
 	{
 		causeException(Exception::Cause::reachedUnreachable);
+	}
+	
+	DEFINE_INTRINSIC_FUNCTION0(wavmIntrinsics,accessViolationTrap,accessViolationTrap,none)
+	{
+		causeException(Exception::Cause::accessViolation);
 	}
 
 	DEFINE_INTRINSIC_FUNCTION3(wavmIntrinsics,indirectCallSignatureMismatch,indirectCallSignatureMismatch,none,i32,index,i64,expectedSignatureBits,i64,tableBits)
@@ -158,7 +163,7 @@ namespace Runtime
 	DEFINE_INTRINSIC_FUNCTION2(wavmIntrinsics,_growMemory,growMemory,i32,i32,deltaPages,i64,memoryBits)
 	{
 		MemoryInstance* memory = reinterpret_cast<MemoryInstance*>(memoryBits);
-		assert(memory);
+		WAVM_ASSERT_THROW(memory);
 		const Iptr numPreviousMemoryPages = growMemory(memory,(Uptr)deltaPages);
 		if(numPreviousMemoryPages + (Uptr)deltaPages > IR::maxMemoryPages) { return -1; }
 		else { return (I32)numPreviousMemoryPages; }
@@ -167,7 +172,7 @@ namespace Runtime
 	DEFINE_INTRINSIC_FUNCTION1(wavmIntrinsics,_currentMemory,currentMemory,i32,i64,memoryBits)
 	{
 		MemoryInstance* memory = reinterpret_cast<MemoryInstance*>(memoryBits);
-		assert(memory);
+		WAVM_ASSERT_THROW(memory);
 		Uptr numMemoryPages = getMemoryNumPages(memory);
 		if(numMemoryPages > UINT32_MAX) { numMemoryPages = UINT32_MAX; }
 		return (U32)numMemoryPages;

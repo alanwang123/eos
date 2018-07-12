@@ -1,5 +1,7 @@
 var searchData=
 [
-  ['tic_5ftac_5ftoe',['tic_tac_toe',['../namespacetic__tac__toe.html',1,'']]],
-  ['token_5fname',['TOKEN_NAME',['../namespace_t_o_k_e_n___n_a_m_e.html',1,'']]]
+  ['_5fdatastream_5fdetail',['_datastream_detail',['../namespaceeosio_1_1__datastream__detail.html',1,'eosio']]],
+  ['_5fmulti_5findex_5fdetail',['_multi_index_detail',['../namespaceeosio_1_1__multi__index__detail.html',1,'eosio']]],
+  ['eosio',['eosio',['../namespaceeosio.html',1,'']]],
+  ['eosiosystem',['eosiosystem',['../namespaceeosiosystem.html',1,'']]]
 ];

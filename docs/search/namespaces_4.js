@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['proxy',['proxy',['../namespaceproxy.html',1,'']]]
+  ['detail',['detail',['../namespacedetail.html',1,'']]]
 ];

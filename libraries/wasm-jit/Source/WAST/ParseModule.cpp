@@ -111,14 +111,16 @@ static void errorIfFollowsDefinitions(ModuleParseState& state)
 }
 
 template<typename Def,typename Type,typename DisassemblyName>
-static void createImport(
+static Uptr createImport(
 	ParseState& state,Name name,std::string&& moduleName,std::string&& exportName,
 	NameToIndexMap& nameToIndexMap,IndexSpace<Def,Type>& indexSpace,std::vector<DisassemblyName>& disassemblyNameArray,
 	Type type)
 {
+	const Uptr importIndex = indexSpace.imports.size();
 	bindName(state,nameToIndexMap,name,indexSpace.size());
 	disassemblyNameArray.push_back({name.getString()});
 	indexSpace.imports.push_back({type,std::move(moduleName),std::move(exportName)});
+	return importIndex;
 }
 
 static bool parseOptionalSharedDeclaration(ModuleParseState& state)
@@ -164,11 +166,17 @@ static void parseImport(ModuleParseState& state)
 		{
 			NameToIndexMap localNameToIndexMap;
 			std::vector<std::string> localDissassemblyNames;
-			const IndexedFunctionType functionType = parseFunctionTypeRef(state,localNameToIndexMap,localDissassemblyNames);
-			createImport(state,name,std::move(moduleName),std::move(exportName),
+			const UnresolvedFunctionType unresolvedFunctionType = parseFunctionTypeRefAndOrDecl(state,localNameToIndexMap,localDissassemblyNames);
+			const Uptr importIndex = createImport(state,name,std::move(moduleName),std::move(exportName),
 				state.functionNameToIndexMap,state.module.functions,state.disassemblyNames.functions,
-				functionType);
+				{UINT32_MAX});
 			state.disassemblyNames.functions.back().locals = localDissassemblyNames;
+
+			// Resolve the function import type after all type declarations have been parsed.
+			state.postTypeCallbacks.push_back([unresolvedFunctionType,importIndex](ModuleParseState& state)
+			{
+				state.module.functions.imports[importIndex].type = resolveFunctionType(state,unresolvedFunctionType);
+			});
 			break;
 		}
 		case t_table:
@@ -373,7 +381,6 @@ static void parseElem(ModuleParseState& state)
 	parseElemSegmentBody(state,tableRef,baseIndex,elemToken);
 }
 
-
 template<typename Def,typename Type,typename ParseImport,typename ParseDef,typename DisassemblyName>
 static void parseObjectDefOrImport(
 	ModuleParseState& state,
@@ -432,9 +439,18 @@ static void parseFunc(ModuleParseState& state)
 	parseObjectDefOrImport(state,state.functionNameToIndexMap,state.module.functions,state.disassemblyNames.functions,t_func,ObjectKind::function,
 		[&](ModuleParseState& state)
 		{
+			// Parse the imported function's type.
 			NameToIndexMap localNameToIndexMap;
 			std::vector<std::string> localDisassemblyNames;
-			return parseFunctionTypeRef(state,localNameToIndexMap,localDisassemblyNames);
+			const UnresolvedFunctionType unresolvedFunctionType = parseFunctionTypeRefAndOrDecl(state,localNameToIndexMap,localDisassemblyNames);
+
+			// Resolve the function import type after all type declarations have been parsed.
+			const Uptr importIndex = state.module.functions.imports.size();
+			state.postTypeCallbacks.push_back([unresolvedFunctionType,importIndex](ModuleParseState& state)
+			{
+				state.module.functions.imports[importIndex].type = resolveFunctionType(state,unresolvedFunctionType);
+			});
+			return IndexedFunctionType {UINT32_MAX};
 		},
 		parseFunctionDef);
 }
@@ -580,6 +596,15 @@ namespace WAST
 			parseDeclaration(state);
 		};
 
+		// Process the callbacks requested after all type declarations have been parsed.
+		if(!state.errors.size())
+		{
+			for(const auto& callback : state.postTypeCallbacks)
+			{
+				callback(state);
+			}
+		}
+
 		// Process the callbacks requested after all declarations have been parsed.
 		if(!state.errors.size())
 		{
@@ -603,10 +628,10 @@ namespace WAST
 		}
 
 		// Set the module's disassembly names.
-		assert(state.module.functions.size() == state.disassemblyNames.functions.size());
-		assert(state.module.tables.size() == state.disassemblyNames.tables.size());
-		assert(state.module.memories.size() == state.disassemblyNames.memories.size());
-		assert(state.module.globals.size() == state.disassemblyNames.globals.size());
+		WAVM_ASSERT_THROW(state.module.functions.size() == state.disassemblyNames.functions.size());
+		WAVM_ASSERT_THROW(state.module.tables.size() == state.disassemblyNames.tables.size());
+		WAVM_ASSERT_THROW(state.module.memories.size() == state.disassemblyNames.memories.size());
+		WAVM_ASSERT_THROW(state.module.globals.size() == state.disassemblyNames.globals.size());
 		IR::setDisassemblyNames(state.module,state.disassemblyNames);
 	}
 

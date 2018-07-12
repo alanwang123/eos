@@ -2,7 +2,7 @@
 find_package(LLVM 4.0 REQUIRED CONFIG)
 set( CMAKE_CXX_STANDARD 14 )
 
-file(GLOB HEADERS "include/eos/abi_generator/*.hpp")
+file(GLOB HEADERS "include/eosio/abi_generator/*.hpp")
 
 set(SOURCES ${HEADERS})
 
@@ -10,11 +10,11 @@ add_library( abi_generator
              abi_generator.cpp
              ${HEADERS} )
 
-target_include_directories( abi_generator
-                            PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
-                                   "${LLVM_INCLUDE_DIRS}" )
+target_include_directories(abi_generator
+                           PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                                  "${LLVM_INCLUDE_DIRS}")
 
-target_link_libraries(abi_generator fc eos_types
+target_link_libraries(abi_generator eosio_chain
   clangRewrite
   clangTooling
   clangToolingCore
@@ -62,13 +62,3 @@ if (USE_PCH)
   set_target_properties(abi_generator PROPERTIES COTIRE_ADD_UNITY_BUILD FALSE)
   cotire(eos_utilities)
 endif(USE_PCH)
-
-install( TARGETS
-   abi_generator
-   RUNTIME DESTINATION bin
-   LIBRARY DESTINATION lib
-   ARCHIVE DESTINATION lib
-)
-
-install( FILES ${HEADERS} DESTINATION "include/eos/abi_generator" )
-
